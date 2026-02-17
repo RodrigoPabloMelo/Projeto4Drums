@@ -1,7 +1,17 @@
 CONFIG = {
     'hit_velocity_threshold': 1000,
     'drum_cooldown': 0.3,
-    'game_mode_enabled': True,
+    'app_mode': {
+        'default_mode': 'playground',  # playground | memory
+        'controls': {
+            'switch_mode_key': 'm',
+            'restart_key': 'r',
+            'quit_key': 'q'
+        }
+    },
+    'playground': {
+        'minimal_hud': True
+    },
     'drums': [
         {'name': 'Snare', 'pos': (0.5, 0.7), 'radius': 80, 'sound': 'sounds/snare_1.wav'},
         {'name': 'HiHat', 'pos': (0.3, 0.7), 'radius': 70, 'sound': 'sounds/hihat_1.wav'},

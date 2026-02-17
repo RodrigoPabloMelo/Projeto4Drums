@@ -12,6 +12,10 @@ from config.config import CONFIG
 # Configure logging
 logger = logging.getLogger(__name__)
 
+MODE_PLAYGROUND = "playground"
+MODE_MEMORY = "memory"
+
+
 class VirtualDrums:
     """Main class for the virtual drums application."""
     def __init__(self):
@@ -21,10 +25,44 @@ class VirtualDrums:
         self.cap = None
         self.kit = None
         self.memory_game: Optional[MemoryGameController] = None
-        self.game_mode_enabled = CONFIG.get("game_mode_enabled", False)
+        self.current_mode = MODE_PLAYGROUND
+        controls = CONFIG.get("app_mode", {}).get("controls", {})
+        self.switch_mode_key = controls.get("switch_mode_key", "m").lower()
+        self.restart_key = controls.get("restart_key", "r").lower()
+        self.quit_key = controls.get("quit_key", "q").lower()
         self.prev_positions: Dict[int, Tuple[int, int, float]] = {}
         self.prev_gesture_active: Dict[Tuple[int, str], bool] = {}
         self.last_gesture_event: Dict[Tuple[int, int, str], float] = {}
+        self.mode_toast: Optional[Tuple[str, float]] = None
+
+    def _resolve_initial_mode(self) -> str:
+        app_mode = CONFIG.get("app_mode", {})
+        default_mode = app_mode.get("default_mode", MODE_PLAYGROUND)
+        if default_mode in (MODE_PLAYGROUND, MODE_MEMORY):
+            return default_mode
+
+        # Backward-compatible fallback.
+        legacy_enabled = CONFIG.get("game_mode_enabled")
+        if legacy_enabled is True:
+            return MODE_MEMORY
+        return MODE_PLAYGROUND
+
+    def _switch_mode(self, now: float) -> None:
+        if self.current_mode == MODE_PLAYGROUND:
+            self.current_mode = MODE_MEMORY
+            if not self.memory_game:
+                self.memory_game = MemoryGameController(
+                    self.kit.get_drum_count(),
+                    CONFIG["memory_game"]
+                )
+            self.memory_game.start_new_run(now)
+            self.mode_toast = ("Switched to Memory", now + 1.0)
+        else:
+            self.current_mode = MODE_PLAYGROUND
+            self.mode_toast = ("Switched to Playground", now + 1.0)
+
+    def _key_matches(self, key_code: int, key_name: str) -> bool:
+        return key_code == ord(key_name.lower())
 
     def setup(self) -> None:
         """Initialize pygame, MediaPipe, and camera."""
@@ -47,7 +85,8 @@ class VirtualDrums:
                 raise RuntimeError("Could not read from camera.")
             h, w = frame.shape[:2]
             self.kit = DrumKit((w, h))
-            if self.game_mode_enabled:
+            self.current_mode = self._resolve_initial_mode()
+            if self.current_mode == MODE_MEMORY:
                 self.memory_game = MemoryGameController(
                     self.kit.get_drum_count(),
                     CONFIG["memory_game"]
@@ -125,7 +164,7 @@ class VirtualDrums:
         self.last_gesture_event[event_key] = current_time
         return drum_index, active_kind
 
-    def _draw_hud(self, frame, hud: Dict) -> None:
+    def _draw_memory_hud(self, frame, hud: Dict) -> None:
         font_scale = CONFIG["memory_game"]["font_scale"]
         lines = [
             f"Mode: Memory",
@@ -133,6 +172,7 @@ class VirtualDrums:
             f"Combo: x{hud['combo_multiplier']:.2f}",
             f"Round: {hud['round']}",
             f"State: {hud['state']}",
+            f"[{self.switch_mode_key.upper()}] Switch  [{self.quit_key.upper()}] Quit",
         ]
 
         y = 30
@@ -141,7 +181,49 @@ class VirtualDrums:
             y += 32
 
         if hud["message"]:
-            cv2.putText(frame, hud["message"], (20, y + 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2)
+            cv2.putText(
+                frame,
+                f"{hud['message']} [{self.restart_key.upper()}]",
+                (20, y + 10),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.9,
+                (0, 0, 255),
+                2
+            )
+
+    def _draw_playground_hud(self, frame) -> None:
+        lines = [
+            "Mode: Playground",
+            f"[{self.switch_mode_key.upper()}] Switch to Memory  [{self.quit_key.upper()}] Quit",
+        ]
+        y = 30
+        for line in lines:
+            cv2.putText(frame, line, (20, y), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2)
+            y += 32
+
+    def _draw_mode_toast(self, frame, now: float) -> None:
+        if not self.mode_toast:
+            return
+        message, expires_at = self.mode_toast
+        if now > expires_at:
+            self.mode_toast = None
+            return
+
+        frame_h, frame_w = frame.shape[:2]
+        text_size, _ = cv2.getTextSize(message, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)
+        text_w, text_h = text_size
+        x = max((frame_w - text_w) // 2, 10)
+        y = max(frame_h - 30, 30)
+
+        # Semi-opaque panel for readability.
+        panel_x1 = max(x - 12, 0)
+        panel_y1 = max(y - text_h - 12, 0)
+        panel_x2 = min(x + text_w + 12, frame_w - 1)
+        panel_y2 = min(y + 10, frame_h - 1)
+        overlay = frame.copy()
+        cv2.rectangle(overlay, (panel_x1, panel_y1), (panel_x2, panel_y2), (20, 20, 20), -1)
+        cv2.addWeighted(overlay, 0.55, frame, 0.45, 0, frame)
+        cv2.putText(frame, message, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
 
     def update_loop(self) -> None:
         """Process one frame of the video feed."""
@@ -174,52 +256,57 @@ class VirtualDrums:
                     vel = (y - py) / dt if dt > 0 else 0.0
                 self.prev_positions[idx] = (x, y, current_time)
 
-                if self.game_mode_enabled and self.memory_game:
-                    strike_idx = self.kit.get_hit_drum_index_by_strike((x, y), vel, current_time)
-                    if strike_idx is not None:
-                        zone_events.append((strike_idx, "strike"))
+                strike_idx = self.kit.get_hit_drum_index_by_strike((x, y), vel, current_time)
+                if strike_idx is not None:
+                    zone_events.append((strike_idx, "strike"))
 
-                    gesture_event = self._detect_gesture_zone_event(
-                        idx, hand_landmarks, (x, y), w, h, current_time
-                    )
-                    if gesture_event:
-                        zone_events.append(gesture_event)
-                else:
-                    self.kit.interact((x, y), vel)
+                gesture_event = self._detect_gesture_zone_event(
+                    idx, hand_landmarks, (x, y), w, h, current_time
+                )
+                if gesture_event:
+                    zone_events.append(gesture_event)
 
                 # Draw hand landmarks
                 self.mp_draw.draw_landmarks(frame, hand_landmarks, self.mp_hands.HAND_CONNECTIONS)
 
         indicator_states = None
-        if self.game_mode_enabled and self.memory_game:
-            dedup_events: List[Tuple[int, str]] = []
-            seen = set()
-            for event in zone_events:
-                if event[0] in seen:
-                    continue
-                dedup_events.append(event)
-                seen.add(event[0])
+        dedup_events: List[Tuple[int, str]] = []
+        seen = set()
+        for event in zone_events:
+            if event[0] in seen:
+                continue
+            dedup_events.append(event)
+            seen.add(event[0])
 
+        if self.current_mode == MODE_MEMORY and self.memory_game:
             game_render_data = self.memory_game.update(current_time, dedup_events)
             indicator_states = game_render_data["indicator_states"]
             for drum_index in game_render_data["play_indices"]:
                 self.kit.play_drum_by_index(drum_index, current_time)
-            self._draw_hud(frame, game_render_data["hud"])
+            self._draw_memory_hud(frame, game_render_data["hud"])
+        else:
+            for drum_index, _source in dedup_events:
+                self.kit.play_drum_by_index(drum_index, current_time)
+            if CONFIG.get("playground", {}).get("minimal_hud", True):
+                self._draw_playground_hud(frame)
 
         self.kit.draw(frame, indicator_states)
+        self._draw_mode_toast(frame, current_time)
         cv2.imshow('Virtual Drums', frame)
 
         key = cv2.waitKey(1) & 0xFF
-        if key == ord('q'):
+        if self._key_matches(key, self.quit_key):
             logger.info("Exit requested by user.")
             raise SystemExit
+        if self._key_matches(key, self.switch_mode_key):
+            self._switch_mode(current_time)
         if (
-            key == ord('r')
-            and self.game_mode_enabled
+            self._key_matches(key, self.restart_key)
+            and self.current_mode == MODE_MEMORY
             and self.memory_game
             and self.memory_game.is_game_over()
         ):
-            self.memory_game.restart(asyncio.get_event_loop().time())
+            self.memory_game.restart(current_time)
 
     def cleanup(self) -> None:
         """Release resources."""
