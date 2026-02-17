@@ -1,0 +1,58 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Ambientes virtuais
+venv/
+env/
+ENV/
+
+# PyCharm
+.idea/
+.idea/*
+.idea/workspace.xml
+.idea/modules.xml
+.idea/misc.xml
+.idea/vcs.xml
+.idea/inspectionProfiles/
+.idea/*.iml
+
+# VS Code
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+
+# Arquivos de sistema
+.DS_Store
+Thumbs.db
+
+# Logs e bancos de dados
+*.log
+*.sqlite
+
+# Arquivos de configuração local
+*.local
+
+# Arquivos de ambiente
+.env
+.env.*
+!.env.example
