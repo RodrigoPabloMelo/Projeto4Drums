@@ -5,6 +5,7 @@ from typing import Dict, List, Optional, Tuple
 import cv2
 import mediapipe as mp
 from pygame import mixer
+import numpy as np
 from playground.drum_kit import DrumKit
 from playground.memory_game import MemoryGameController
 from config.config import CONFIG
@@ -28,6 +29,8 @@ class VirtualDrums:
         self.cap = None
         self.kit = None
         self.memory_game: Optional[MemoryGameController] = None
+        self.fail_sound = None
+        self.success_sound = None
         self.current_mode = MODE_PLAYGROUND
         controls = CONFIG.get("app_mode", {}).get("controls", {})
         self.switch_mode_key = controls.get("switch_mode_key", "m").lower()
@@ -38,14 +41,20 @@ class VirtualDrums:
         self.last_gesture_event: Dict[Tuple[int, int, str], float] = {}
         self.mode_toast: Optional[Tuple[str, float]] = None
         self.last_command_time: Dict[str, float] = {}
+        self.command_hold_candidate: Optional[str] = None
+        self.command_hold_started_at: float = 0.0
         self.last_memory_input_index: Optional[int] = None
         self.last_memory_input_time: float = 0.0
         self.memory_safe_until: float = 0.0
+        self.session_high_score: int = 0
+        self.fail_visual_until: float = 0.0
+        self.fail_visual_message = "ERROU! GAME OVER"
 
     def _reset_memory_safe_guard(self) -> None:
         self.last_memory_input_index = None
         self.last_memory_input_time = 0.0
         self.memory_safe_until = 0.0
+        self.fail_visual_until = 0.0
 
     def _resolve_initial_mode(self) -> str:
         app_mode = CONFIG.get("app_mode", {})
@@ -86,6 +95,13 @@ class VirtualDrums:
     def _key_matches(self, key_code: int, key_name: str) -> bool:
         return key_code == ord(key_name.lower())
 
+    def _load_optional_sound(self, path: str):
+        try:
+            return mixer.Sound(path)
+        except Exception as e:
+            logger.warning(f"Could not load optional sound '{path}': {e}")
+            return None
+
     def setup(self) -> None:
         """Initialize pygame, MediaPipe, and camera."""
         try:
@@ -107,6 +123,11 @@ class VirtualDrums:
                 raise RuntimeError("Could not read from camera.")
             h, w = frame.shape[:2]
             self.kit = DrumKit((w, h))
+            self.fail_sound = self._load_optional_sound(CONFIG["memory_game"].get("fail_sound", "sounds/fail_1.wav"))
+            success_path = CONFIG["memory_game"].get("success_sound", "sounds/success_1.wav")
+            self.success_sound = self._load_optional_sound(success_path)
+            if self.success_sound is None:
+                self.success_sound = self._load_optional_sound("sounds/crash_1.wav")
             self.current_mode = self._resolve_initial_mode()
             if self.current_mode == MODE_MEMORY:
                 self.memory_game = MemoryGameController(
@@ -190,10 +211,9 @@ class VirtualDrums:
         self.last_command_time[command] = now
         return True
 
-    def _detect_command_gesture(
+    def _detect_command_candidate(
         self,
-        hand_inputs: List[Dict],
-        current_time: float
+        hand_inputs: List[Dict]
     ) -> Optional[str]:
         if not CONFIG.get("gesture_controls", {}).get("enabled", True):
             return None
@@ -211,18 +231,42 @@ class VirtualDrums:
             and self.current_mode == MODE_MEMORY
             and self.memory_game
             and self.memory_game.is_game_over()
-            and self._should_accept_command(CMD_RESTART_MEMORY, current_time)
         ):
             return CMD_RESTART_MEMORY
 
         for info in outside_inputs:
             if self._is_victory(info["landmarks"]):
-                if self._should_accept_command(CMD_SWITCH_PLAYGROUND, current_time):
-                    return CMD_SWITCH_PLAYGROUND
+                return CMD_SWITCH_PLAYGROUND
             if self._is_pointing_up(info["landmarks"]):
-                if self._should_accept_command(CMD_SWITCH_MEMORY, current_time):
-                    return CMD_SWITCH_MEMORY
+                return CMD_SWITCH_MEMORY
         return None
+
+    def _detect_command_gesture(
+        self,
+        hand_inputs: List[Dict],
+        current_time: float
+    ) -> Optional[str]:
+        candidate = self._detect_command_candidate(hand_inputs)
+        if candidate is None:
+            self.command_hold_candidate = None
+            self.command_hold_started_at = 0.0
+            return None
+
+        if candidate != self.command_hold_candidate:
+            self.command_hold_candidate = candidate
+            self.command_hold_started_at = current_time
+            return None
+
+        hold_s = CONFIG["gesture_controls"]["command_hold_ms"] / 1000.0
+        if current_time - self.command_hold_started_at < hold_s:
+            return None
+
+        if not self._should_accept_command(candidate, current_time):
+            return None
+
+        self.command_hold_candidate = None
+        self.command_hold_started_at = 0.0
+        return candidate
 
     def _detect_gesture_zone_event(
         self,
@@ -268,17 +312,39 @@ class VirtualDrums:
         self.last_gesture_event[event_key] = current_time
         return drum_index, active_kind
 
-    def _draw_memory_hud(self, frame, hud: Dict, safe_remaining_s: float = 0.0) -> None:
+    def _draw_memory_hud(self, frame, hud: Dict, safe_remaining_s: float = 0.0, countdown_value: Optional[int] = None) -> None:
         font_scale = CONFIG["memory_game"]["font_scale"]
+        frame_h, frame_w = frame.shape[:2]
+        score_line = f"Score: {hud['score']}"
+        high_line = f"High Score: {self.session_high_score}"
+        score_w, score_h = cv2.getTextSize(score_line, cv2.FONT_HERSHEY_SIMPLEX, 1.0, 2)[0]
+        high_w, _ = cv2.getTextSize(high_line, cv2.FONT_HERSHEY_SIMPLEX, 0.75, 2)[0]
+        cv2.putText(
+            frame,
+            score_line,
+            ((frame_w - score_w) // 2, 32 + score_h),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1.0,
+            (255, 255, 255),
+            2,
+        )
+        cv2.putText(
+            frame,
+            high_line,
+            ((frame_w - high_w) // 2, 100),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.75,
+            (255, 255, 255),
+            2,
+        )
+
         lines = [
-            f"Mode: Memory",
-            f"Score: {hud['score']}",
+            "Mode: Memory",
             f"Combo: x{hud['combo_multiplier']:.2f}",
             f"Round: {hud['round']}",
             f"State: {hud['state']}",
             f"[{self.switch_mode_key.upper()}] Switch  [{self.quit_key.upper()}] Quit",
         ]
-
         y = 30
         for line in lines:
             cv2.putText(frame, line, (20, y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), 2)
@@ -305,6 +371,13 @@ class VirtualDrums:
                 (0, 255, 255),
                 2
             )
+
+        if countdown_value is not None:
+            text = str(countdown_value)
+            text_size, _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 3.5, 7)
+            tx = (frame_w - text_size[0]) // 2
+            ty = (frame_h + text_size[1]) // 2
+            cv2.putText(frame, text, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, 3.5, (255, 255, 255), 7)
 
     def _draw_playground_hud(self, frame) -> None:
         lines = [
@@ -339,6 +412,29 @@ class VirtualDrums:
         cv2.rectangle(overlay, (panel_x1, panel_y1), (panel_x2, panel_y2), (20, 20, 20), -1)
         cv2.addWeighted(overlay, 0.55, frame, 0.45, 0, frame)
         cv2.putText(frame, message, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+
+    def _draw_failure_effect(self, frame: np.ndarray, now: float) -> np.ndarray:
+        if now > self.fail_visual_until:
+            return frame
+
+        frame_h, frame_w = frame.shape[:2]
+        overlay = frame.copy()
+        cv2.rectangle(overlay, (0, 0), (frame_w - 1, frame_h - 1), (0, 0, 255), -1)
+        cv2.addWeighted(overlay, 0.28, frame, 0.72, 0, frame)
+
+        t = max(0.0, self.fail_visual_until - now)
+        shake_px = int(CONFIG["memory_game"].get("fail_shake_px", 12))
+        dx = int(math.sin(t * 40.0) * shake_px)
+        dy = int(math.cos(t * 28.0) * (shake_px * 0.5))
+        transform = np.float32([[1, 0, dx], [0, 1, dy]])
+        shaken = cv2.warpAffine(frame, transform, (frame_w, frame_h), borderMode=cv2.BORDER_REFLECT)
+
+        text = self.fail_visual_message
+        text_size, _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 1.4, 4)
+        tx = (frame_w - text_size[0]) // 2
+        ty = (frame_h + text_size[1]) // 2
+        cv2.putText(shaken, text, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, 1.4, (255, 255, 255), 4)
+        return shaken
 
     def _apply_command(self, command: Optional[str], now: float) -> None:
         if command == CMD_SWITCH_PLAYGROUND:
@@ -382,6 +478,14 @@ class VirtualDrums:
             filtered.append((drum_index, source))
 
         return filtered
+
+    def _play_sound_safe(self, sound) -> None:
+        if sound is None:
+            return
+        try:
+            sound.play()
+        except Exception as e:
+            logger.warning(f"Failed to play effect sound: {e}")
 
     def update_loop(self) -> None:
         """Process one frame of the video feed."""
@@ -456,8 +560,20 @@ class VirtualDrums:
             indicator_states = game_render_data["indicator_states"]
             for drum_index in game_render_data["play_indices"]:
                 self.kit.play_drum_by_index(drum_index, current_time)
+            self.session_high_score = max(self.session_high_score, game_render_data["hud"]["score"])
+            if game_render_data.get("failed_this_frame"):
+                self._play_sound_safe(self.fail_sound)
+                overlay_ms = CONFIG["memory_game"].get("fail_overlay_ms", 1000)
+                self.fail_visual_until = current_time + (overlay_ms / 1000.0)
+            if game_render_data.get("sequence_completed_this_frame"):
+                self._play_sound_safe(self.success_sound)
             safe_remaining = max(0.0, self.memory_safe_until - current_time)
-            self._draw_memory_hud(frame, game_render_data["hud"], safe_remaining_s=safe_remaining)
+            self._draw_memory_hud(
+                frame,
+                game_render_data["hud"],
+                safe_remaining_s=safe_remaining,
+                countdown_value=game_render_data.get("countdown_value"),
+            )
         else:
             for drum_index, _source in dedup_events:
                 self.kit.play_drum_by_index(drum_index, current_time)
@@ -465,6 +581,7 @@ class VirtualDrums:
                 self._draw_playground_hud(frame)
 
         self.kit.draw(frame, indicator_states)
+        frame = self._draw_failure_effect(frame, current_time)
         self._draw_mode_toast(frame, current_time)
         cv2.imshow('Virtual Drums', frame)
 

@@ -1,10 +1,12 @@
 import random
+import math
 from typing import Dict, List, Optional, Tuple
 
 
 class MemoryGameController:
     """Controls Simon-style sequence playback and input validation."""
 
+    ROUND_READY = "ROUND_READY"
     SHOW_SEQUENCE = "SHOW_SEQUENCE"
     WAIT_INPUT = "WAIT_INPUT"
     GAME_OVER = "GAME_OVER"
@@ -14,6 +16,7 @@ class MemoryGameController:
         self.game_config = game_config
         self.highlight_s = game_config["highlight_ms"] / 1000.0
         self.between_s = game_config["between_steps_ms"] / 1000.0
+        self.round_ready_s = game_config["round_ready_countdown_ms"] / 1000.0
         self.input_timeout_s = game_config["input_timeout_ms"] / 1000.0
         self.feedback_s = game_config["feedback_ms"] / 1000.0
         self.base_points = game_config["base_points"]
@@ -36,7 +39,7 @@ class MemoryGameController:
 
     def start_new_run(self, now: float) -> None:
         self.sequence = [self.rng.randrange(self.drum_count)]
-        self.phase = self.SHOW_SEQUENCE
+        self.phase = self.ROUND_READY
         self.round = 1
         self.score = 0
         self.combo_count = 0
@@ -61,6 +64,12 @@ class MemoryGameController:
         self.expected_index = 0
         self.input_deadline = 0.0
 
+    def _advance_to_round_ready(self, now: float) -> None:
+        self.phase = self.ROUND_READY
+        self.phase_started_at = now
+        self.expected_index = 0
+        self.input_deadline = 0.0
+
     def _advance_to_wait_input(self, now: float) -> None:
         self.phase = self.WAIT_INPUT
         self.expected_index = 0
@@ -76,21 +85,29 @@ class MemoryGameController:
         if failed_drum_index is not None:
             self._set_feedback(failed_drum_index, "wrong", now)
 
-    def _update_phase(self, now: float) -> None:
-        if self.phase == self.SHOW_SEQUENCE:
+    def _update_phase(self, now: float) -> bool:
+        failed_this_frame = False
+        if self.phase == self.ROUND_READY:
+            if now - self.phase_started_at >= self.round_ready_s:
+                self._advance_to_show_sequence(now)
+        elif self.phase == self.SHOW_SEQUENCE:
             cycle = self.highlight_s + self.between_s
             if now - self.phase_started_at >= len(self.sequence) * cycle:
                 self._advance_to_wait_input(now)
         elif self.phase == self.WAIT_INPUT and now > self.input_deadline:
             self._set_game_over(now, None)
+            failed_this_frame = True
 
         if self.feedback and now > self.feedback[2]:
             self.feedback = None
+        return failed_this_frame
 
-    def _process_inputs(self, events: List[Tuple[int, str]], now: float) -> List[int]:
+    def _process_inputs(self, events: List[Tuple[int, str]], now: float) -> Tuple[List[int], bool, bool]:
         play_indices: List[int] = []
+        sequence_completed_this_frame = False
+        failed_this_frame = False
         if self.phase != self.WAIT_INPUT:
-            return play_indices
+            return play_indices, sequence_completed_this_frame, failed_this_frame
 
         for drum_index, _source in events:
             expected = self.sequence[self.expected_index]
@@ -107,13 +124,15 @@ class MemoryGameController:
                     self.score += self.round_bonus
                     self.round += 1
                     self.sequence.append(self.rng.randrange(self.drum_count))
-                    self._advance_to_show_sequence(now + self.between_s)
+                    self._advance_to_round_ready(now + self.between_s)
+                    sequence_completed_this_frame = True
                     break
             else:
                 self._set_game_over(now, drum_index)
+                failed_this_frame = True
                 break
 
-        return play_indices
+        return play_indices, sequence_completed_this_frame, failed_this_frame
 
     def _build_indicator_states(self, now: float) -> Dict[int, str]:
         states = {idx: "idle" for idx in range(self.drum_count)}
@@ -136,14 +155,27 @@ class MemoryGameController:
 
         return states
 
+    def _countdown_value(self, now: float) -> Optional[int]:
+        if self.phase != self.ROUND_READY:
+            return None
+        remaining = self.round_ready_s - (now - self.phase_started_at)
+        if remaining <= 0:
+            return None
+        return max(1, int(math.ceil(remaining)))
+
     def update(self, now: float, events: List[Tuple[int, str]]) -> Dict:
         """Update state machine and return render/audio instructions."""
-        self._update_phase(now)
-        play_indices = self._process_inputs(events, now)
+        timed_out_fail = self._update_phase(now)
+        play_indices, sequence_completed, input_fail = self._process_inputs(events, now)
+        failed_this_frame = timed_out_fail or input_fail
 
         return {
             "indicator_states": self._build_indicator_states(now),
             "play_indices": play_indices,
+            "countdown_value": self._countdown_value(now),
+            "failure_visual_active": self.phase == self.GAME_OVER,
+            "sequence_completed_this_frame": sequence_completed,
+            "failed_this_frame": failed_this_frame,
             "hud": {
                 "score": self.score,
                 "combo_multiplier": self.get_combo_multiplier(),
