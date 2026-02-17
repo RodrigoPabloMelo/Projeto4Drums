@@ -14,6 +14,9 @@ logger = logging.getLogger(__name__)
 
 MODE_PLAYGROUND = "playground"
 MODE_MEMORY = "memory"
+CMD_SWITCH_PLAYGROUND = "switch_playground"
+CMD_SWITCH_MEMORY = "switch_memory"
+CMD_RESTART_MEMORY = "restart_memory"
 
 
 class VirtualDrums:
@@ -34,6 +37,15 @@ class VirtualDrums:
         self.prev_gesture_active: Dict[Tuple[int, str], bool] = {}
         self.last_gesture_event: Dict[Tuple[int, int, str], float] = {}
         self.mode_toast: Optional[Tuple[str, float]] = None
+        self.last_command_time: Dict[str, float] = {}
+        self.last_memory_input_index: Optional[int] = None
+        self.last_memory_input_time: float = 0.0
+        self.memory_safe_until: float = 0.0
+
+    def _reset_memory_safe_guard(self) -> None:
+        self.last_memory_input_index = None
+        self.last_memory_input_time = 0.0
+        self.memory_safe_until = 0.0
 
     def _resolve_initial_mode(self) -> str:
         app_mode = CONFIG.get("app_mode", {})
@@ -49,17 +61,27 @@ class VirtualDrums:
 
     def _switch_mode(self, now: float) -> None:
         if self.current_mode == MODE_PLAYGROUND:
+            self._switch_to_mode(MODE_MEMORY, now, force_new_run=True)
+        else:
+            self._switch_to_mode(MODE_PLAYGROUND, now, force_new_run=False)
+
+    def _switch_to_mode(self, mode: str, now: float, force_new_run: bool) -> None:
+        if mode == MODE_MEMORY:
             self.current_mode = MODE_MEMORY
             if not self.memory_game:
                 self.memory_game = MemoryGameController(
                     self.kit.get_drum_count(),
                     CONFIG["memory_game"]
                 )
-            self.memory_game.start_new_run(now)
+            if force_new_run:
+                self.memory_game.start_new_run(now)
+                self._reset_memory_safe_guard()
             self.mode_toast = ("Switched to Memory", now + 1.0)
-        else:
-            self.current_mode = MODE_PLAYGROUND
-            self.mode_toast = ("Switched to Playground", now + 1.0)
+            return
+
+        self.current_mode = MODE_PLAYGROUND
+        self._reset_memory_safe_guard()
+        self.mode_toast = ("Switched to Playground", now + 1.0)
 
     def _key_matches(self, key_code: int, key_name: str) -> bool:
         return key_code == ord(key_name.lower())
@@ -120,6 +142,88 @@ class VirtualDrums:
         avg_fold = fold / len(tips)
         return avg_fold < CONFIG["memory_game"]["fist_fold_threshold"]
 
+    def _finger_fold_ratios(self, hand_landmarks) -> Dict[str, float]:
+        finger_points = {
+            "index": (8, 5),
+            "middle": (12, 9),
+            "ring": (16, 13),
+            "pinky": (20, 17),
+        }
+        wrist = hand_landmarks.landmark[0]
+        palm_ref = hand_landmarks.landmark[9]
+        palm_scale = max(math.hypot(wrist.x - palm_ref.x, wrist.y - palm_ref.y), 1e-4)
+
+        ratios: Dict[str, float] = {}
+        for name, (tip_idx, knuckle_idx) in finger_points.items():
+            tip = hand_landmarks.landmark[tip_idx]
+            knuckle = hand_landmarks.landmark[knuckle_idx]
+            ratios[name] = math.hypot(tip.x - knuckle.x, tip.y - knuckle.y) / palm_scale
+        return ratios
+
+    def _is_pointing_up(self, hand_landmarks) -> bool:
+        ratios = self._finger_fold_ratios(hand_landmarks)
+        threshold = CONFIG["gesture_controls"]["pointing_up_fold_threshold"]
+        extended_threshold = threshold + 0.2
+        return (
+            ratios["index"] > extended_threshold
+            and ratios["middle"] < threshold
+            and ratios["ring"] < threshold
+            and ratios["pinky"] < threshold
+        )
+
+    def _is_victory(self, hand_landmarks) -> bool:
+        ratios = self._finger_fold_ratios(hand_landmarks)
+        threshold = CONFIG["gesture_controls"]["victory_fold_threshold"]
+        extended_threshold = threshold + 0.2
+        return (
+            ratios["index"] > extended_threshold
+            and ratios["middle"] > extended_threshold
+            and ratios["ring"] < threshold
+            and ratios["pinky"] < threshold
+        )
+
+    def _should_accept_command(self, command: str, now: float) -> bool:
+        debounce_s = CONFIG["gesture_controls"]["gesture_command_debounce_ms"] / 1000.0
+        last = self.last_command_time.get(command, 0.0)
+        if now - last < debounce_s:
+            return False
+        self.last_command_time[command] = now
+        return True
+
+    def _detect_command_gesture(
+        self,
+        hand_inputs: List[Dict],
+        current_time: float
+    ) -> Optional[str]:
+        if not CONFIG.get("gesture_controls", {}).get("enabled", True):
+            return None
+
+        outside_inputs = [
+            info for info in hand_inputs
+            if self.kit.get_drum_index_at_position(info["index_pos"]) is None
+        ]
+        if not outside_inputs:
+            return None
+
+        fists_outside = [info for info in outside_inputs if self._is_fist(info["landmarks"])]
+        if (
+            len(fists_outside) >= 2
+            and self.current_mode == MODE_MEMORY
+            and self.memory_game
+            and self.memory_game.is_game_over()
+            and self._should_accept_command(CMD_RESTART_MEMORY, current_time)
+        ):
+            return CMD_RESTART_MEMORY
+
+        for info in outside_inputs:
+            if self._is_victory(info["landmarks"]):
+                if self._should_accept_command(CMD_SWITCH_PLAYGROUND, current_time):
+                    return CMD_SWITCH_PLAYGROUND
+            if self._is_pointing_up(info["landmarks"]):
+                if self._should_accept_command(CMD_SWITCH_MEMORY, current_time):
+                    return CMD_SWITCH_MEMORY
+        return None
+
     def _detect_gesture_zone_event(
         self,
         hand_idx: int,
@@ -164,7 +268,7 @@ class VirtualDrums:
         self.last_gesture_event[event_key] = current_time
         return drum_index, active_kind
 
-    def _draw_memory_hud(self, frame, hud: Dict) -> None:
+    def _draw_memory_hud(self, frame, hud: Dict, safe_remaining_s: float = 0.0) -> None:
         font_scale = CONFIG["memory_game"]["font_scale"]
         lines = [
             f"Mode: Memory",
@@ -188,6 +292,17 @@ class VirtualDrums:
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.9,
                 (0, 0, 255),
+                2
+            )
+
+        if safe_remaining_s > 0:
+            cv2.putText(
+                frame,
+                f"SAFE ACTIVE: {safe_remaining_s:.1f}s",
+                (20, y + 46),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.8,
+                (0, 255, 255),
                 2
             )
 
@@ -225,6 +340,49 @@ class VirtualDrums:
         cv2.addWeighted(overlay, 0.55, frame, 0.45, 0, frame)
         cv2.putText(frame, message, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
 
+    def _apply_command(self, command: Optional[str], now: float) -> None:
+        if command == CMD_SWITCH_PLAYGROUND:
+            self._switch_to_mode(MODE_PLAYGROUND, now, force_new_run=False)
+        elif command == CMD_SWITCH_MEMORY:
+            self._switch_to_mode(MODE_MEMORY, now, force_new_run=True)
+        elif command == CMD_RESTART_MEMORY and self.memory_game:
+            self.memory_game.restart(now)
+            self._reset_memory_safe_guard()
+            self.mode_toast = ("Memory restarted", now + 1.0)
+
+    def _apply_memory_safe_window(
+        self,
+        events: List[Tuple[int, str]],
+        now: float
+    ) -> List[Tuple[int, str]]:
+        if not self.memory_game or self.memory_game.phase != self.memory_game.WAIT_INPUT:
+            return events
+
+        filtered: List[Tuple[int, str]] = []
+        expected = None
+        if self.memory_game.expected_index < len(self.memory_game.sequence):
+            expected = self.memory_game.sequence[self.memory_game.expected_index]
+
+        duplicate_window_s = CONFIG["gesture_controls"]["double_input_window_ms"] / 1000.0
+        safe_time_s = CONFIG["gesture_controls"]["safe_time_ms"] / 1000.0
+
+        for drum_index, source in events:
+            if (
+                self.last_memory_input_index == drum_index
+                and now - self.last_memory_input_time <= duplicate_window_s
+            ):
+                self.memory_safe_until = max(self.memory_safe_until, now + safe_time_s)
+
+            self.last_memory_input_index = drum_index
+            self.last_memory_input_time = now
+
+            safe_active = now < self.memory_safe_until
+            if safe_active and expected is not None and drum_index != expected:
+                continue
+            filtered.append((drum_index, source))
+
+        return filtered
+
     def update_loop(self) -> None:
         """Process one frame of the video feed."""
         if not self.cap or not self.cap.isOpened():
@@ -241,19 +399,36 @@ class VirtualDrums:
         result = self.hands.process(rgb)
         current_time = asyncio.get_event_loop().time()
         zone_events: List[Tuple[int, str]] = []
+        hand_inputs: List[Dict] = []
 
         if result.multi_hand_landmarks:
             for idx, hand_landmarks in enumerate(result.multi_hand_landmarks):
                 lm = hand_landmarks.landmark[8]  # Index finger tip
                 w, h = frame.shape[1], frame.shape[0]
                 x, y = int(lm.x * w), int(lm.y * h)
+                hand_inputs.append({
+                    "hand_idx": idx,
+                    "landmarks": hand_landmarks,
+                    "index_pos": (x, y),
+                    "frame_w": w,
+                    "frame_h": h,
+                })
 
-                # Compute vertical velocity
-                vel = 0.0
-                if idx in self.prev_positions:
-                    px, py, pt = self.prev_positions[idx]
-                    dt = current_time - pt
-                    vel = (y - py) / dt if dt > 0 else 0.0
+                # Draw hand landmarks
+                self.mp_draw.draw_landmarks(frame, hand_landmarks, self.mp_hands.HAND_CONNECTIONS)
+
+        command = self._detect_command_gesture(hand_inputs, current_time)
+        if command:
+            self._apply_command(command, current_time)
+        else:
+            for info in hand_inputs:
+                idx = info["hand_idx"]
+                hand_landmarks = info["landmarks"]
+                x, y = info["index_pos"]
+                w, h = info["frame_w"], info["frame_h"]
+                px, py, pt = self.prev_positions.get(idx, (x, y, current_time))
+                dt = current_time - pt
+                vel = (y - py) / dt if dt > 0 else 0.0
                 self.prev_positions[idx] = (x, y, current_time)
 
                 strike_idx = self.kit.get_hit_drum_index_by_strike((x, y), vel, current_time)
@@ -266,9 +441,6 @@ class VirtualDrums:
                 if gesture_event:
                     zone_events.append(gesture_event)
 
-                # Draw hand landmarks
-                self.mp_draw.draw_landmarks(frame, hand_landmarks, self.mp_hands.HAND_CONNECTIONS)
-
         indicator_states = None
         dedup_events: List[Tuple[int, str]] = []
         seen = set()
@@ -279,11 +451,13 @@ class VirtualDrums:
             seen.add(event[0])
 
         if self.current_mode == MODE_MEMORY and self.memory_game:
-            game_render_data = self.memory_game.update(current_time, dedup_events)
+            safe_events = self._apply_memory_safe_window(dedup_events, current_time)
+            game_render_data = self.memory_game.update(current_time, safe_events)
             indicator_states = game_render_data["indicator_states"]
             for drum_index in game_render_data["play_indices"]:
                 self.kit.play_drum_by_index(drum_index, current_time)
-            self._draw_memory_hud(frame, game_render_data["hud"])
+            safe_remaining = max(0.0, self.memory_safe_until - current_time)
+            self._draw_memory_hud(frame, game_render_data["hud"], safe_remaining_s=safe_remaining)
         else:
             for drum_index, _source in dedup_events:
                 self.kit.play_drum_by_index(drum_index, current_time)
@@ -307,6 +481,7 @@ class VirtualDrums:
             and self.memory_game.is_game_over()
         ):
             self.memory_game.restart(current_time)
+            self._reset_memory_safe_guard()
 
     def cleanup(self) -> None:
         """Release resources."""

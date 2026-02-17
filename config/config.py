@@ -12,6 +12,14 @@ CONFIG = {
     'playground': {
         'minimal_hud': True
     },
+    'gesture_controls': {
+        'enabled': True,
+        'safe_time_ms': 1000,
+        'double_input_window_ms': 250,
+        'pointing_up_fold_threshold': 0.5,
+        'victory_fold_threshold': 0.5,
+        'gesture_command_debounce_ms': 700
+    },
     'drums': [
         {'name': 'Snare', 'pos': (0.5, 0.7), 'radius': 80, 'sound': 'sounds/snare_1.wav'},
         {'name': 'HiHat', 'pos': (0.3, 0.7), 'radius': 70, 'sound': 'sounds/hihat_1.wav'},
