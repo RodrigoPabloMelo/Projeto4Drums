@@ -1,5 +1,6 @@
 import logging
 from typing import Dict, Optional, Tuple
+
 import cv2
 import numpy as np
 from pygame import mixer
@@ -7,8 +8,10 @@ from pygame import mixer
 # Logger do modulo.
 logger = logging.getLogger(__name__)
 
+
 class Drum:
     """Representa um tambor com posicao, som e deteccao de impacto."""
+
     def __init__(self, name: str, pos: Tuple[int, int], radius: int, sound_path: str, cooldown: float):
         # Metadados basicos do tambor.
         self.name = name
@@ -52,7 +55,7 @@ class Drum:
         frame: np.ndarray,
         current_time: float,
         indicator_state: Optional[str] = None,
-        indicator_colors: Optional[Dict[str, Tuple[int, int, int]]] = None
+        indicator_colors: Optional[Dict[str, Tuple[int, int, int]]] = None,
     ) -> None:
         """Desenha o tambor com cores opcionais do jogo."""
         # Usa cores do modo memory quando fornecidas.
@@ -65,8 +68,13 @@ class Drum:
         cv2.circle(frame, self.pos, self.radius, color, 4)
         # Escreve o nome do tambor acima do circulo.
         cv2.putText(
-            frame, self.name, (self.pos[0] - self.radius, self.pos[1] - self.radius - 10),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2
+            frame,
+            self.name,
+            (self.pos[0] - self.radius, self.pos[1] - self.radius - 10),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (255, 255, 255),
+            2,
         )
 
     def check_hit(self, hand_pos: Tuple[int, int], hand_vel: float, current_time: float, velocity_threshold: float) -> bool:
@@ -75,3 +83,4 @@ class Drum:
         if self.contains_point(hand_pos) and hand_vel > velocity_threshold:
             return self.try_play(current_time)
         return False
+

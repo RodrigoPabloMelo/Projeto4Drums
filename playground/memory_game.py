@@ -44,6 +44,9 @@ class MemoryGameController:
         self.feedback: Optional[Tuple[int, str, float]] = None
         self.failed_drum_index: Optional[int] = None
 
+        # Constantes de estado expostas para outras partes do sistema.
+        self.WAIT_INPUT = self.WAIT_INPUT
+
     def start_new_run(self, now: float) -> None:
         # Inicia nova partida com uma sequencia inicial.
         self.sequence = [self.rng.randrange(self.drum_count)]
@@ -215,3 +218,4 @@ class MemoryGameController:
                 "message": "GAME OVER - press R to restart" if self.phase == self.GAME_OVER else "",
             },
         }
+

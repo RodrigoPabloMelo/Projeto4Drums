@@ -1,5 +1,11 @@
-import asyncio
 import logging
+from typing import Optional
+
+from config.config import CONFIG
+
+logger = logging.getLogger(__name__)
+
+import asyncio
 import math
 from typing import Dict, List, Optional, Tuple
 import cv2
