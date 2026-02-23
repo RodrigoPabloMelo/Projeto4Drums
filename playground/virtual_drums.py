@@ -10,9 +10,10 @@ from playground.drum_kit import DrumKit
 from playground.memory_game import MemoryGameController
 from config.config import CONFIG
 
-# Configure logging
+# Logger do modulo.
 logger = logging.getLogger(__name__)
 
+# Constantes de modo e comandos.
 MODE_PLAYGROUND = "playground"
 MODE_MEMORY = "memory"
 CMD_SWITCH_PLAYGROUND = "switch_playground"
@@ -21,60 +22,79 @@ CMD_RESTART_MEMORY = "restart_memory"
 
 
 class VirtualDrums:
-    """Main class for the virtual drums application."""
+    """Classe principal da aplicacao de bateria virtual."""
     def __init__(self):
+        # Componentes do MediaPipe.
         self.mp_hands = mp.solutions.hands
         self.mp_draw = mp.solutions.drawing_utils
         self.hands = None
+        # Camera e kit de tambores.
         self.cap = None
         self.kit = None
+        # Controlador do modo memory.
         self.memory_game: Optional[MemoryGameController] = None
+        # Sons opcionais de feedback.
         self.fail_sound = None
         self.success_sound = None
+        # Estado atual.
         self.current_mode = MODE_PLAYGROUND
+        # Teclas configuradas.
         controls = CONFIG.get("app_mode", {}).get("controls", {})
         self.switch_mode_key = controls.get("switch_mode_key", "m").lower()
         self.restart_key = controls.get("restart_key", "r").lower()
         self.quit_key = controls.get("quit_key", "q").lower()
+        # Memoria de posicoes anteriores para calcular velocidade.
         self.prev_positions: Dict[int, Tuple[int, int, float]] = {}
+        # Controle de gestos ativos para transicoes.
         self.prev_gesture_active: Dict[Tuple[int, str], bool] = {}
+        # Debounce de eventos por gesto.
         self.last_gesture_event: Dict[Tuple[int, int, str], float] = {}
+        # Toasts de modo.
         self.mode_toast: Optional[Tuple[str, float]] = None
+        # Debounce para comandos por gesto.
         self.last_command_time: Dict[str, float] = {}
+        # Estado do "segurar gesto" para comandos.
         self.command_hold_candidate: Optional[str] = None
         self.command_hold_started_at: float = 0.0
+        # Guardas do modo memory para entradas duplicadas.
         self.last_memory_input_index: Optional[int] = None
         self.last_memory_input_time: float = 0.0
         self.memory_safe_until: float = 0.0
+        # Estatisticas da sessao.
         self.session_high_score: int = 0
+        # Efeito visual de falha.
         self.fail_visual_until: float = 0.0
         self.fail_visual_message = "ERROU! GAME OVER"
 
     def _reset_memory_safe_guard(self) -> None:
+        # Reseta protecoes contra entradas duplicadas no modo memory.
         self.last_memory_input_index = None
         self.last_memory_input_time = 0.0
         self.memory_safe_until = 0.0
         self.fail_visual_until = 0.0
 
     def _resolve_initial_mode(self) -> str:
+        # Resolve o modo inicial com compatibilidade retroativa.
         app_mode = CONFIG.get("app_mode", {})
         default_mode = app_mode.get("default_mode", MODE_PLAYGROUND)
         if default_mode in (MODE_PLAYGROUND, MODE_MEMORY):
             return default_mode
 
-        # Backward-compatible fallback.
+        # Fallback para configuracao antiga.
         legacy_enabled = CONFIG.get("game_mode_enabled")
         if legacy_enabled is True:
             return MODE_MEMORY
         return MODE_PLAYGROUND
 
     def _switch_mode(self, now: float) -> None:
+        # Alterna entre playground e memory.
         if self.current_mode == MODE_PLAYGROUND:
             self._switch_to_mode(MODE_MEMORY, now, force_new_run=True)
         else:
             self._switch_to_mode(MODE_PLAYGROUND, now, force_new_run=False)
 
     def _switch_to_mode(self, mode: str, now: float, force_new_run: bool) -> None:
+        # Aplica mudanca de modo e atualiza estado do jogo.
         if mode == MODE_MEMORY:
             self.current_mode = MODE_MEMORY
             if not self.memory_game:
@@ -93,9 +113,11 @@ class VirtualDrums:
         self.mode_toast = ("Switched to Playground", now + 1.0)
 
     def _key_matches(self, key_code: int, key_name: str) -> bool:
+        # Compara tecla pressionada com a configurada.
         return key_code == ord(key_name.lower())
 
     def _load_optional_sound(self, path: str):
+        # Carrega um som opcional sem quebrar a execucao em caso de falha.
         try:
             return mixer.Sound(path)
         except Exception as e:
@@ -103,31 +125,37 @@ class VirtualDrums:
             return None
 
     def setup(self) -> None:
-        """Initialize pygame, MediaPipe, and camera."""
+        """Inicializa pygame, MediaPipe e camera."""
         try:
+            # Inicializa o mixer de audio.
             mixer.init()
         except Exception as e:
             logger.error(f"Failed to initialize pygame mixer: {e}")
             raise
 
         try:
+            # Inicializa o MediaPipe Hands.
             self.hands = self.mp_hands.Hands(**CONFIG['hands_config'])
         except Exception as e:
             logger.error(f"Failed to initialize MediaPipe Hands: {e}")
             raise
 
         try:
+            # Abre a camera e valida leitura inicial.
             self.cap = cv2.VideoCapture(CONFIG['camera_index'])
             ret, frame = self.cap.read()
             if not ret:
                 raise RuntimeError("Could not read from camera.")
+            # Cria o kit de tambores com dimensoes do frame.
             h, w = frame.shape[:2]
             self.kit = DrumKit((w, h))
+            # Carrega sons de feedback do modo memory.
             self.fail_sound = self._load_optional_sound(CONFIG["memory_game"].get("fail_sound", "sounds/fail_1.wav"))
             success_path = CONFIG["memory_game"].get("success_sound", "sounds/success_1.wav")
             self.success_sound = self._load_optional_sound(success_path)
             if self.success_sound is None:
                 self.success_sound = self._load_optional_sound("sounds/crash_1.wav")
+            # Define modo inicial e cria controlador se necessario.
             self.current_mode = self._resolve_initial_mode()
             if self.current_mode == MODE_MEMORY:
                 self.memory_game = MemoryGameController(
@@ -140,6 +168,7 @@ class VirtualDrums:
             raise
 
     def _is_pinched(self, hand_landmarks, frame_w: int, frame_h: int) -> bool:
+        # Detecta gesto de pinça usando distancia entre polegar e indicador.
         thumb_tip = hand_landmarks.landmark[4]
         index_tip = hand_landmarks.landmark[8]
         pinch_dist = math.hypot(
@@ -149,6 +178,7 @@ class VirtualDrums:
         return pinch_dist < CONFIG["memory_game"]["gesture_pinched_threshold"]
 
     def _is_fist(self, hand_landmarks) -> bool:
+        # Detecta punho fechado comparando dobra dos dedos.
         tips = (8, 12, 16, 20)
         knuckles = (5, 9, 13, 17)
         wrist = hand_landmarks.landmark[0]
@@ -164,6 +194,7 @@ class VirtualDrums:
         return avg_fold < CONFIG["memory_game"]["fist_fold_threshold"]
 
     def _finger_fold_ratios(self, hand_landmarks) -> Dict[str, float]:
+        # Calcula relacao de dobra de cada dedo.
         finger_points = {
             "index": (8, 5),
             "middle": (12, 9),
@@ -182,6 +213,7 @@ class VirtualDrums:
         return ratios
 
     def _is_pointing_up(self, hand_landmarks) -> bool:
+        # Detecta gesto de "apontar para cima" (apenas indicador estendido).
         ratios = self._finger_fold_ratios(hand_landmarks)
         threshold = CONFIG["gesture_controls"]["pointing_up_fold_threshold"]
         extended_threshold = threshold + 0.2
@@ -193,6 +225,7 @@ class VirtualDrums:
         )
 
     def _is_victory(self, hand_landmarks) -> bool:
+        # Detecta gesto de "vitoria" (indicador e medio estendidos).
         ratios = self._finger_fold_ratios(hand_landmarks)
         threshold = CONFIG["gesture_controls"]["victory_fold_threshold"]
         extended_threshold = threshold + 0.2
@@ -204,6 +237,7 @@ class VirtualDrums:
         )
 
     def _should_accept_command(self, command: str, now: float) -> bool:
+        # Debounce para evitar comandos repetidos em pouco tempo.
         debounce_s = CONFIG["gesture_controls"]["gesture_command_debounce_ms"] / 1000.0
         last = self.last_command_time.get(command, 0.0)
         if now - last < debounce_s:
@@ -215,6 +249,7 @@ class VirtualDrums:
         self,
         hand_inputs: List[Dict]
     ) -> Optional[str]:
+        # Detecta possivel comando baseado em gestos fora da area dos tambores.
         if not CONFIG.get("gesture_controls", {}).get("enabled", True):
             return None
 
@@ -246,6 +281,7 @@ class VirtualDrums:
         hand_inputs: List[Dict],
         current_time: float
     ) -> Optional[str]:
+        # Valida o comando apenas apos segurar o gesto por um tempo.
         candidate = self._detect_command_candidate(hand_inputs)
         if candidate is None:
             self.command_hold_candidate = None
@@ -277,6 +313,7 @@ class VirtualDrums:
         frame_h: int,
         current_time: float
     ) -> Optional[Tuple[int, str]]:
+        # Detecta evento de gesto (pinch ou fist) sobre um tambor.
         pinched = self._is_pinched(hand_landmarks, frame_w, frame_h)
         fist = self._is_fist(hand_landmarks)
 
@@ -290,6 +327,7 @@ class VirtualDrums:
         if active_kind:
             was_active = self.prev_gesture_active.get((hand_idx, active_kind), False)
 
+        # Atualiza o estado de gesto ativo para cada mao.
         for gesture_kind in ("pinch", "fist"):
             self.prev_gesture_active[(hand_idx, gesture_kind)] = (gesture_kind == active_kind)
 
@@ -299,10 +337,12 @@ class VirtualDrums:
         if was_active:
             return None
 
+        # Verifica se o gesto ocorreu sobre algum tambor.
         drum_index = self.kit.get_drum_index_at_position(index_pos)
         if drum_index is None:
             return None
 
+        # Debounce para gestos por tambor.
         debounce_s = CONFIG["memory_game"]["gesture_debounce_ms"] / 1000.0
         event_key = (hand_idx, drum_index, active_kind)
         last_event_time = self.last_gesture_event.get(event_key, 0.0)
@@ -313,6 +353,7 @@ class VirtualDrums:
         return drum_index, active_kind
 
     def _draw_memory_hud(self, frame, hud: Dict, safe_remaining_s: float = 0.0, countdown_value: Optional[int] = None) -> None:
+        # Desenha o HUD do modo memory.
         font_scale = CONFIG["memory_game"]["font_scale"]
         frame_h, frame_w = frame.shape[:2]
         score_line = f"Score: {hud['score']}"
@@ -351,6 +392,7 @@ class VirtualDrums:
             y += 32
 
         if hud["message"]:
+            # Mensagem de game over.
             cv2.putText(
                 frame,
                 f"{hud['message']} [{self.restart_key.upper()}]",
@@ -362,6 +404,7 @@ class VirtualDrums:
             )
 
         if safe_remaining_s > 0:
+            # Indicador de janela segura ativa.
             cv2.putText(
                 frame,
                 f"SAFE ACTIVE: {safe_remaining_s:.1f}s",
@@ -373,6 +416,7 @@ class VirtualDrums:
             )
 
         if countdown_value is not None:
+            # Contagem regressiva centralizada.
             text = str(countdown_value)
             text_size, _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 3.5, 7)
             tx = (frame_w - text_size[0]) // 2
@@ -380,6 +424,7 @@ class VirtualDrums:
             cv2.putText(frame, text, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, 3.5, (255, 255, 255), 7)
 
     def _draw_playground_hud(self, frame) -> None:
+        # Desenha o HUD simples do modo playground.
         lines = [
             "Mode: Playground",
             f"[{self.switch_mode_key.upper()}] Switch to Memory  [{self.quit_key.upper()}] Quit",
@@ -390,6 +435,7 @@ class VirtualDrums:
             y += 32
 
     def _draw_mode_toast(self, frame, now: float) -> None:
+        # Mostra toast temporario com o modo atual.
         if not self.mode_toast:
             return
         message, expires_at = self.mode_toast
@@ -403,7 +449,7 @@ class VirtualDrums:
         x = max((frame_w - text_w) // 2, 10)
         y = max(frame_h - 30, 30)
 
-        # Semi-opaque panel for readability.
+        # Painel semi-opaco para melhorar leitura.
         panel_x1 = max(x - 12, 0)
         panel_y1 = max(y - text_h - 12, 0)
         panel_x2 = min(x + text_w + 12, frame_w - 1)
@@ -414,6 +460,7 @@ class VirtualDrums:
         cv2.putText(frame, message, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
 
     def _draw_failure_effect(self, frame: np.ndarray, now: float) -> np.ndarray:
+        # Aplica overlay vermelho e tremor quando houver falha.
         if now > self.fail_visual_until:
             return frame
 
@@ -437,6 +484,7 @@ class VirtualDrums:
         return shaken
 
     def _apply_command(self, command: Optional[str], now: float) -> None:
+        # Executa o comando detectado por gesto.
         if command == CMD_SWITCH_PLAYGROUND:
             self._switch_to_mode(MODE_PLAYGROUND, now, force_new_run=False)
         elif command == CMD_SWITCH_MEMORY:
@@ -451,6 +499,7 @@ class VirtualDrums:
         events: List[Tuple[int, str]],
         now: float
     ) -> List[Tuple[int, str]]:
+        # Aplica janela segura para evitar penalidade por double input.
         if not self.memory_game or self.memory_game.phase != self.memory_game.WAIT_INPUT:
             return events
 
@@ -480,6 +529,7 @@ class VirtualDrums:
         return filtered
 
     def _play_sound_safe(self, sound) -> None:
+        # Toca som ignorando falhas para nao quebrar o loop.
         if sound is None:
             return
         try:
@@ -488,7 +538,7 @@ class VirtualDrums:
             logger.warning(f"Failed to play effect sound: {e}")
 
     def update_loop(self) -> None:
-        """Process one frame of the video feed."""
+        """Processa um frame do video."""
         if not self.cap or not self.cap.isOpened():
             logger.error("Camera not initialized or closed.")
             return
@@ -498,7 +548,9 @@ class VirtualDrums:
             logger.warning("Failed to read frame from camera.")
             return
 
+        # Espelha a imagem para ficar mais natural para o usuario.
         frame = cv2.flip(frame, 1)
+        # Converte para RGB para o MediaPipe.
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         result = self.hands.process(rgb)
         current_time = asyncio.get_event_loop().time()
@@ -507,7 +559,8 @@ class VirtualDrums:
 
         if result.multi_hand_landmarks:
             for idx, hand_landmarks in enumerate(result.multi_hand_landmarks):
-                lm = hand_landmarks.landmark[8]  # Index finger tip
+                # Usa a ponta do indicador como posicao principal.
+                lm = hand_landmarks.landmark[8]  # Ponta do dedo indicador
                 w, h = frame.shape[1], frame.shape[0]
                 x, y = int(lm.x * w), int(lm.y * h)
                 hand_inputs.append({
@@ -518,9 +571,10 @@ class VirtualDrums:
                     "frame_h": h,
                 })
 
-                # Draw hand landmarks
+                # Desenha os pontos da mao.
                 self.mp_draw.draw_landmarks(frame, hand_landmarks, self.mp_hands.HAND_CONNECTIONS)
 
+        # Detecta comando por gesto (trocar modo, reiniciar, etc).
         command = self._detect_command_gesture(hand_inputs, current_time)
         if command:
             self._apply_command(command, current_time)
@@ -530,15 +584,18 @@ class VirtualDrums:
                 hand_landmarks = info["landmarks"]
                 x, y = info["index_pos"]
                 w, h = info["frame_w"], info["frame_h"]
+                # Calcula velocidade do movimento da mao.
                 px, py, pt = self.prev_positions.get(idx, (x, y, current_time))
                 dt = current_time - pt
                 vel = (y - py) / dt if dt > 0 else 0.0
                 self.prev_positions[idx] = (x, y, current_time)
 
+                # Detecta strike baseado em velocidade e posicao.
                 strike_idx = self.kit.get_hit_drum_index_by_strike((x, y), vel, current_time)
                 if strike_idx is not None:
                     zone_events.append((strike_idx, "strike"))
 
+                # Detecta eventos por gesto (pinch/fist) sobre um tambor.
                 gesture_event = self._detect_gesture_zone_event(
                     idx, hand_landmarks, (x, y), w, h, current_time
                 )
@@ -546,6 +603,7 @@ class VirtualDrums:
                     zone_events.append(gesture_event)
 
         indicator_states = None
+        # Remove eventos duplicados para o mesmo tambor no mesmo frame.
         dedup_events: List[Tuple[int, str]] = []
         seen = set()
         for event in zone_events:
@@ -555,17 +613,22 @@ class VirtualDrums:
             seen.add(event[0])
 
         if self.current_mode == MODE_MEMORY and self.memory_game:
+            # Aplica janela segura e atualiza o jogo de memoria.
             safe_events = self._apply_memory_safe_window(dedup_events, current_time)
             game_render_data = self.memory_game.update(current_time, safe_events)
             indicator_states = game_render_data["indicator_states"]
+            # Toca tambores indicados pelo jogo.
             for drum_index in game_render_data["play_indices"]:
                 self.kit.play_drum_by_index(drum_index, current_time)
+            # Atualiza high score da sessao.
             self.session_high_score = max(self.session_high_score, game_render_data["hud"]["score"])
             if game_render_data.get("failed_this_frame"):
+                # Som e efeito visual de falha.
                 self._play_sound_safe(self.fail_sound)
                 overlay_ms = CONFIG["memory_game"].get("fail_overlay_ms", 1000)
                 self.fail_visual_until = current_time + (overlay_ms / 1000.0)
             if game_render_data.get("sequence_completed_this_frame"):
+                # Som de sucesso ao completar sequencia.
                 self._play_sound_safe(self.success_sound)
             safe_remaining = max(0.0, self.memory_safe_until - current_time)
             self._draw_memory_hud(
@@ -575,16 +638,19 @@ class VirtualDrums:
                 countdown_value=game_render_data.get("countdown_value"),
             )
         else:
+            # Modo livre: toca tambores diretamente.
             for drum_index, _source in dedup_events:
                 self.kit.play_drum_by_index(drum_index, current_time)
             if CONFIG.get("playground", {}).get("minimal_hud", True):
                 self._draw_playground_hud(frame)
 
+        # Desenha tambores e overlays.
         self.kit.draw(frame, indicator_states)
         frame = self._draw_failure_effect(frame, current_time)
         self._draw_mode_toast(frame, current_time)
         cv2.imshow('Virtual Drums', frame)
 
+        # Le teclas de controle.
         key = cv2.waitKey(1) & 0xFF
         if self._key_matches(key, self.quit_key):
             logger.info("Exit requested by user.")
@@ -601,7 +667,7 @@ class VirtualDrums:
             self._reset_memory_safe_guard()
 
     def cleanup(self) -> None:
-        """Release resources."""
+        """Libera recursos de camera, janelas e audio."""
         if self.cap:
             self.cap.release()
         cv2.destroyAllWindows()
