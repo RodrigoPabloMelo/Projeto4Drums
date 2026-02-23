@@ -41,9 +41,9 @@ CONFIG = {
     },
     # Lista de tambores, suas posicoes e sons.
     'drums': [
-        {'name': 'Snare', 'pos': (0.5, 0.7), 'radius': 80, 'sound': 'sounds/snare_1.wav'},
-        {'name': 'HiHat', 'pos': (0.3, 0.7), 'radius': 70, 'sound': 'sounds/hihat_1.wav'},
-        {'name': 'Crash', 'pos': (0.7, 0.5), 'radius': 70, 'sound': 'sounds/crash_1.wav'},
+        {'name': 'Snare', 'pos': (0.5, 0.8), 'radius': 160, 'sound': 'sounds/snare_1.wav'},
+        {'name': 'HiHat', 'pos': (0.3, 0.7), 'radius': 120, 'sound': 'sounds/hihat_1.wav'},
+        {'name': 'Crash', 'pos': (0.7, 0.5), 'radius': 100, 'sound': 'sounds/crash_1.wav'},
     ],
     # Configuracoes do jogo de memoria.
     'memory_game': {

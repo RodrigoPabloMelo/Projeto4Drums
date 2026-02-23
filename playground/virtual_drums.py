@@ -654,7 +654,7 @@ class VirtualDrums:
         self.kit.draw(frame, indicator_states)
         frame = self._draw_failure_effect(frame, current_time)
         self._draw_mode_toast(frame, current_time)
-        cv2.imshow('Virtual Drums', frame)
+        cv2.imshow('DRUMble', frame)
 
         # Le teclas de controle.
         key = cv2.waitKey(1) & 0xFF
