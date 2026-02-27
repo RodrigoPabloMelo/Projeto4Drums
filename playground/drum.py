@@ -143,7 +143,7 @@ class Drum:
         glow_alpha = 0.08
         if indicator_state and indicator_colors:
             glow_color = indicator_colors.get(indicator_state, glow_color)
-            glow_alpha = 0.18 if indicator_state != "idle" else 0.10
+            glow_alpha = 0.30 if indicator_state in ("active", "correct") else 0.22 if indicator_state == "wrong" else 0.10
         elif hit_progress > 0.0:
             glow_color = (230, 230, 230)
             glow_alpha = 0.18

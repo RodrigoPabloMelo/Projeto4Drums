@@ -168,7 +168,8 @@ class VirtualDrums:
             success_path = CONFIG["memory_game"].get("success_sound", "sounds/success_1.wav")
             self.success_sound = self._load_optional_sound(success_path)
             if self.success_sound is None:
-                self.success_sound = self._load_optional_sound("sounds/crash_1.wav")
+                crash_fallback = CONFIG.get("sound_bindings", {}).get("crash", "sounds/crash_1.wav")
+                self.success_sound = self._load_optional_sound(crash_fallback)
             # Define modo inicial e cria controlador se necessario.
             self.current_mode = self._resolve_initial_mode()
             if self.current_mode == MODE_MEMORY:
@@ -584,7 +585,7 @@ class VirtualDrums:
         logo_center = (w // 2, int(h * 0.49))
         self.kit.renderer.draw_asset(
             blended,
-            "assets/logo.svg",
+            CONFIG.get("assets", {}).get("logo", "assets/logo.svg"),
             logo_center,
             (logo_w, logo_h),
             alpha_scale=max(0.0, min(1.0, 1.0 - ((1.0 - alpha) * 0.3))),
@@ -614,10 +615,10 @@ class VirtualDrums:
         score_line = f"Score: {hud['score']}"
         high_line = f"High Score: {self.session_high_score}"
         self._draw_text(
-            frame, score_line, frame_w // 2, 66, size=40, color_bgr=(255, 255, 255), align="center", weight="bold", fallback_scale=1.0
+            frame, score_line, frame_w // 2, 66, size=40, color_bgr=(0, 140, 255), align="center", weight="bold", fallback_scale=1.0
         )
         self._draw_text(
-            frame, high_line, frame_w // 2, 108, size=28, color_bgr=(255, 255, 255), align="center", weight="regular", fallback_scale=0.75
+            frame, high_line, frame_w // 2, 108, size=28, color_bgr=(0, 0, 0), align="center", weight="regular", fallback_scale=0.75
         )
 
         if hud["message"]:
@@ -781,17 +782,14 @@ class VirtualDrums:
             return
 
         baqueta_cfg = CONFIG.get("baqueta", {})
-        asset_path = baqueta_cfg.get("asset")
-        if not asset_path:
+        default_asset_path = baqueta_cfg.get("asset")
+        asset_left = baqueta_cfg.get("asset_left", default_asset_path)
+        asset_right = baqueta_cfg.get("asset_right", default_asset_path)
+        if not default_asset_path and not asset_left and not asset_right:
             return
 
         min_dim = min(frame.shape[1], frame.shape[0])
         stick_h = max(56, int(min_dim * baqueta_cfg.get("height_pct", 0.26)))
-        native_w, native_h = self.kit.renderer.get_asset_size(asset_path)
-        if native_h > 0:
-            stick_w = max(8, int(stick_h * (native_w / native_h)))
-        else:
-            stick_w = max(8, int(stick_h * baqueta_cfg.get("width_ratio", 0.09)))
         tip_offset = int(stick_h * baqueta_cfg.get("tip_offset_pct", 0.18))
         stroke_cfg = {
             "enabled": bool(baqueta_cfg.get("stroke_enabled", True)),
@@ -799,9 +797,28 @@ class VirtualDrums:
             "px": int(baqueta_cfg.get("stroke_px", 2)),
         }
 
-        for idx, hand_info in enumerate(hand_inputs[:2]):
+        ordered_hands = sorted(hand_inputs[:2], key=lambda info: info["index_pos"][0])
+        total_hands = len(ordered_hands)
+        for idx, hand_info in enumerate(ordered_hands):
             tip_x, tip_y = hand_info["index_pos"]
-            side_offset = int(stick_w * 0.4) * (-1 if idx == 0 else 1)
+            if total_hands >= 2:
+                is_left_hand = idx == 0
+            else:
+                is_left_hand = tip_x < (frame.shape[1] // 2)
+
+            asset_path = asset_left if is_left_hand else asset_right
+            if not asset_path:
+                asset_path = default_asset_path
+            if not asset_path:
+                continue
+
+            native_w, native_h = self.kit.renderer.get_asset_size(asset_path)
+            if native_h > 0:
+                stick_w = max(8, int(stick_h * (native_w / native_h)))
+            else:
+                stick_w = max(8, int(stick_h * baqueta_cfg.get("width_ratio", 0.09)))
+
+            side_offset = int(stick_w * 0.4) * (-1 if is_left_hand else 1)
             center = (tip_x + side_offset, tip_y - tip_offset)
             self.kit.renderer.draw_asset(
                 frame,

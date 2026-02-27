@@ -1,3 +1,22 @@
+import sys
+from pathlib import Path
+
+
+def _runtime_base_dir() -> Path:
+    # No executavel, usa o diretorio temporario do bundle; no source, raiz do projeto.
+    if getattr(sys, "frozen", False):
+        meipass = getattr(sys, "_MEIPASS", "")
+        if meipass:
+            return Path(meipass)
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent.parent
+
+
+def _resource_path(relative_path: str) -> str:
+    # Converte caminho relativo de recurso para caminho absoluto valido em runtime.
+    return str((_runtime_base_dir() / relative_path).resolve())
+
+
 CONFIG = {
     # Velocidade minima para considerar um golpe no tambor.
     'hit_velocity_threshold': 1000,
@@ -56,6 +75,7 @@ CONFIG = {
         },
     },
     'assets': {
+        'logo': 'assets/logo.svg',
         'mode_icons': {
             'playground': 'assets/playground.svg',
             'memory': 'assets/memory.svg',
@@ -104,8 +124,11 @@ CONFIG = {
     },
     # Configuracao visual das baquetas (maos).
     'baqueta': {
-        # Asset SVG da baqueta.
-        'asset': 'assets/baqueta.svg',
+        # Asset padrao de fallback.
+        'asset': 'assets/baqueta-l.svg',
+        # Assets dedicados por mao.
+        'asset_left': 'assets/baqueta-l.svg',
+        'asset_right': 'assets/baqueta-r.svg',
         # Cor da baqueta em BGR (#5300C7).
         'tint_bgr': (199, 0, 83),
         # Altura relativa em funcao do menor lado do canvas.
@@ -115,7 +138,7 @@ CONFIG = {
         # Distancia vertical do centro da baqueta para a ponta do indicador.
         'tip_offset_pct': 0.18,
         # Stroke branco ao redor da baqueta.
-        'stroke_enabled': True,
+        'stroke_enabled': False,
         'stroke_color_bgr': (255, 255, 255),
         'stroke_px': 2,
     },
@@ -209,8 +232,8 @@ CONFIG = {
         # Cores dos indicadores por estado.
         'indicator_colors': {
             'idle': (70, 70, 70),
-            'active': (0, 220, 255),
-            'correct': (0, 255, 0),
+            'active': (0, 235, 255),
+            'correct': (0, 255, 80),
             'wrong': (0, 0, 255)
         }
     },
@@ -228,3 +251,44 @@ CONFIG = {
     # FPS alvo do loop principal.
     'fps': 60
 }
+
+
+def _resolve_resource_paths(config: dict) -> None:
+    # Resolve todos os caminhos de assets/sounds/fonts para funcionamento no executavel.
+    assets_cfg = config.get('assets', {})
+    logo_path = assets_cfg.get('logo')
+    if logo_path:
+        assets_cfg['logo'] = _resource_path(logo_path)
+    mode_icons = assets_cfg.get('mode_icons', {})
+    for key in list(mode_icons.keys()):
+        mode_icons[key] = _resource_path(mode_icons[key])
+
+    fonts_cfg = config.get('fonts', {})
+    for key in list(fonts_cfg.keys()):
+        if fonts_cfg[key]:
+            fonts_cfg[key] = _resource_path(fonts_cfg[key])
+
+    baqueta_cfg = config.get('baqueta', {})
+    for key in ('asset', 'asset_left', 'asset_right'):
+        value = baqueta_cfg.get(key)
+        if value:
+            baqueta_cfg[key] = _resource_path(value)
+
+    sound_bindings = config.get('sound_bindings', {})
+    for key in list(sound_bindings.keys()):
+        sound_bindings[key] = _resource_path(sound_bindings[key])
+
+    memory_cfg = config.get('memory_game', {})
+    for key in ('fail_sound', 'success_sound'):
+        value = memory_cfg.get(key)
+        if value:
+            memory_cfg[key] = _resource_path(value)
+
+    drums_cfg = config.get('drums', [])
+    for drum in drums_cfg:
+        asset = drum.get('asset')
+        if asset:
+            drum['asset'] = _resource_path(asset)
+
+
+_resolve_resource_paths(CONFIG)
