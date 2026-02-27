@@ -1,20 +1,16 @@
-import logging
-from typing import Optional
-
-from config.config import CONFIG
-
-logger = logging.getLogger(__name__)
-
 import asyncio
+import logging
 import math
 from typing import Dict, List, Optional, Tuple
+
 import cv2
 import mediapipe as mp
-from pygame import mixer
 import numpy as np
+from pygame import mixer
+
+from config.config import CONFIG
 from playground.drum_kit import DrumKit
 from playground.memory_game import MemoryGameController
-from config.config import CONFIG
 
 # Logger do modulo.
 logger = logging.getLogger(__name__)
@@ -32,7 +28,6 @@ class VirtualDrums:
     def __init__(self):
         # Componentes do MediaPipe.
         self.mp_hands = mp.solutions.hands
-        self.mp_draw = mp.solutions.drawing_utils
         self.hands = None
         # Camera e kit de tambores.
         self.cap = None
@@ -543,22 +538,66 @@ class VirtualDrums:
         except Exception as e:
             logger.warning(f"Failed to play effect sound: {e}")
 
+    def _build_synthetic_canvas(self, frame_dim: Tuple[int, int]) -> np.ndarray:
+        # Cria canvas neutro para exibir apenas o kit (sem feed da camera).
+        frame_w, frame_h = frame_dim
+        canvas = np.full((frame_h, frame_w, 3), 220, dtype=np.uint8)
+        focus_radius = int(min(frame_w, frame_h) * 0.52)
+        cv2.circle(
+            canvas,
+            (frame_w // 2, int(frame_h * 0.56)),
+            focus_radius,
+            (236, 236, 236),
+            -1,
+            lineType=cv2.LINE_AA,
+        )
+        return canvas
+
+    def _draw_baquetas(self, frame: np.ndarray, hand_inputs: List[Dict]) -> None:
+        # Renderiza cada mao detectada usando o asset de baqueta.
+        if not self.kit:
+            return
+
+        baqueta_cfg = CONFIG.get("baqueta", {})
+        asset_path = baqueta_cfg.get("asset")
+        if not asset_path:
+            return
+
+        min_dim = min(frame.shape[1], frame.shape[0])
+        stick_h = max(56, int(min_dim * baqueta_cfg.get("height_pct", 0.26)))
+        native_w, native_h = self.kit.renderer.get_asset_size(asset_path)
+        if native_h > 0:
+            stick_w = max(8, int(stick_h * (native_w / native_h)))
+        else:
+            stick_w = max(8, int(stick_h * baqueta_cfg.get("width_ratio", 0.09)))
+        tip_offset = int(stick_h * baqueta_cfg.get("tip_offset_pct", 0.18))
+
+        for idx, hand_info in enumerate(hand_inputs[:2]):
+            tip_x, tip_y = hand_info["index_pos"]
+            side_offset = int(stick_w * 0.4) * (-1 if idx == 0 else 1)
+            center = (tip_x + side_offset, tip_y - tip_offset)
+            self.kit.renderer.draw_asset(frame, asset_path, center, (stick_w, stick_h), alpha_scale=0.98)
+
     def update_loop(self) -> None:
         """Processa um frame do video."""
         if not self.cap or not self.cap.isOpened():
             logger.error("Camera not initialized or closed.")
             return
 
-        ret, frame = self.cap.read()
+        ret, camera_frame = self.cap.read()
         if not ret:
             logger.warning("Failed to read frame from camera.")
             return
 
-        # Espelha a imagem para ficar mais natural para o usuario.
-        frame = cv2.flip(frame, 1)
-        # Converte para RGB para o MediaPipe.
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        # Camera segue sendo usada para rastreamento, sem ser exibida.
+        camera_frame = cv2.flip(camera_frame, 1)
+        rgb = cv2.cvtColor(camera_frame, cv2.COLOR_BGR2RGB)
         result = self.hands.process(rgb)
+
+        frame_h, frame_w = camera_frame.shape[:2]
+        self.kit.update_frame_dim((frame_w, frame_h))
+        frame = self._build_synthetic_canvas((frame_w, frame_h))
+
         current_time = asyncio.get_event_loop().time()
         zone_events: List[Tuple[int, str]] = []
         hand_inputs: List[Dict] = []
@@ -567,18 +606,14 @@ class VirtualDrums:
             for idx, hand_landmarks in enumerate(result.multi_hand_landmarks):
                 # Usa a ponta do indicador como posicao principal.
                 lm = hand_landmarks.landmark[8]  # Ponta do dedo indicador
-                w, h = frame.shape[1], frame.shape[0]
-                x, y = int(lm.x * w), int(lm.y * h)
+                x, y = int(lm.x * frame_w), int(lm.y * frame_h)
                 hand_inputs.append({
                     "hand_idx": idx,
                     "landmarks": hand_landmarks,
                     "index_pos": (x, y),
-                    "frame_w": w,
-                    "frame_h": h,
+                    "frame_w": frame_w,
+                    "frame_h": frame_h,
                 })
-
-                # Desenha os pontos da mao.
-                self.mp_draw.draw_landmarks(frame, hand_landmarks, self.mp_hands.HAND_CONNECTIONS)
 
         # Detecta comando por gesto (trocar modo, reiniciar, etc).
         command = self._detect_command_gesture(hand_inputs, current_time)
@@ -609,6 +644,11 @@ class VirtualDrums:
                     zone_events.append(gesture_event)
 
         indicator_states = None
+        memory_hud: Optional[Dict] = None
+        countdown_value: Optional[int] = None
+        safe_remaining = 0.0
+        draw_playground_hud = False
+
         # Remove eventos duplicados para o mesmo tambor no mesmo frame.
         dedup_events: List[Tuple[int, str]] = []
         seen = set()
@@ -636,22 +676,29 @@ class VirtualDrums:
             if game_render_data.get("sequence_completed_this_frame"):
                 # Som de sucesso ao completar sequencia.
                 self._play_sound_safe(self.success_sound)
+            memory_hud = game_render_data["hud"]
             safe_remaining = max(0.0, self.memory_safe_until - current_time)
-            self._draw_memory_hud(
-                frame,
-                game_render_data["hud"],
-                safe_remaining_s=safe_remaining,
-                countdown_value=game_render_data.get("countdown_value"),
-            )
+            countdown_value = game_render_data.get("countdown_value")
         else:
             # Modo livre: toca tambores diretamente.
             for drum_index, _source in dedup_events:
                 self.kit.play_drum_by_index(drum_index, current_time)
             if CONFIG.get("playground", {}).get("minimal_hud", True):
-                self._draw_playground_hud(frame)
+                draw_playground_hud = True
 
         # Desenha tambores e overlays.
         self.kit.draw(frame, indicator_states)
+        self._draw_baquetas(frame, hand_inputs)
+        if memory_hud is not None:
+            self._draw_memory_hud(
+                frame,
+                memory_hud,
+                safe_remaining_s=safe_remaining,
+                countdown_value=countdown_value,
+            )
+        elif draw_playground_hud:
+            self._draw_playground_hud(frame)
+
         frame = self._draw_failure_effect(frame, current_time)
         self._draw_mode_toast(frame, current_time)
         cv2.imshow('DRUMble', frame)

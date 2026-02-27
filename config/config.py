@@ -39,11 +39,74 @@ CONFIG = {
         # Tempo de segurar gesto para confirmar comando.
         'command_hold_ms': 3000
     },
-    # Lista de tambores, suas posicoes e sons.
+    # Vinculos de som por papel logico do tambor.
+    'sound_bindings': {
+        'snare': 'sounds/snare_1.wav',
+        'hihat': 'sounds/hihat_1.wav',
+        'crash': 'sounds/crash_1.wav',
+        'bass': 'sounds/bass.wav',
+    },
+    # Configuracao visual das baquetas (maos).
+    'baqueta': {
+        # Asset SVG da baqueta.
+        'asset': 'assets/baqueta.svg',
+        # Altura relativa em funcao do menor lado do canvas.
+        'height_pct': 0.26,
+        # Largura = height * width_ratio.
+        'width_ratio': 0.09,
+        # Distancia vertical do centro da baqueta para a ponta do indicador.
+        'tip_offset_pct': 0.18,
+    },
+    # Lista de tambores em visao superior.
     'drums': [
-        {'name': 'Snare', 'pos': (0.5, 0.8), 'radius': 160, 'sound': 'sounds/snare_1.wav'},
-        {'name': 'HiHat', 'pos': (0.3, 0.7), 'radius': 120, 'sound': 'sounds/hihat_1.wav'},
-        {'name': 'Crash', 'pos': (0.7, 0.5), 'radius': 100, 'sound': 'sounds/crash_1.wav'},
+        {
+            'id': 'cymbal_left',
+            'asset': 'assets/cymbal-left.svg',
+            'position_pct': (0.30, 0.21),
+            'size_pct': 0.16,
+            'radius_pct': 0.08,
+            'sound_binding': 'hihat',
+        },
+        {
+            'id': 'cymbal_right',
+            'asset': 'assets/cymbal-right.svg',
+            'position_pct': (0.68, 0.18),
+            'size_pct': 0.24,
+            'radius_pct': 0.10,
+            'sound_binding': 'crash',
+        },
+        {
+            'id': 'snare_mid_left',
+            'asset': 'assets/snare.svg',
+            'position_pct': (0.46, 0.48),
+            'size_pct': 0.19,
+            'radius_pct': 0.09,
+            'sound_binding': 'snare',
+        },
+        {
+            'id': 'snare_mid_right',
+            'asset': 'assets/snare.svg',
+            'position_pct': (0.58, 0.48),
+            'size_pct': 0.17,
+            'radius_pct': 0.085,
+            'sound_binding': 'snare',
+        },
+        {
+            'id': 'kick_left',
+            'asset': 'assets/tom1.svg',
+            'position_pct': (0.24, 0.74),
+            'size_pct': 0.30,
+            'radius_pct': 0.12,
+            'sound_binding': 'bass',
+        },
+        {
+            'id': 'kick_right',
+            'asset': 'assets/tom2.svg',
+            'position_pct': (0.73, 0.74),
+            'size_pct': 0.36,
+            'radius_pct': 0.14,
+            'sound_binding': 'bass',
+        },
     ],
     # Configuracoes do jogo de memoria.
     'memory_game': {
