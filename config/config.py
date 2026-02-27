@@ -36,6 +36,29 @@ CONFIG = {
         'intro_hold_ms': 450,
         # Limite em Y para considerar mao levantada (indicador acima do punho).
         'hand_raise_margin': 0.02,
+        # Configuracao da tab de modo no topo.
+        'tab': {
+            'container_width_pct': 0.60,
+            'container_height_px': 92,
+            'top_margin_px': 22,
+            'corner_radius_px': 46,
+            'inner_padding_px': 8,
+            'container_bg_bgr': (245, 245, 245),
+            'active_bg_bgr': (199, 0, 83),  # #5300C7
+            'text_active_bgr': (255, 255, 255),
+            'text_inactive_bgr': (199, 0, 83),
+        },
+        # Configuracao especifica da intro.
+        'intro': {
+            'panel_opacity': 0.75,
+            'text_gap_px': 16,
+        },
+    },
+    'assets': {
+        'mode_icons': {
+            'playground': 'assets/playground.svg',
+            'memory': 'assets/memory.svg',
+        },
     },
     # Configuracoes de tipografia.
     'fonts': {
@@ -82,6 +105,8 @@ CONFIG = {
     'baqueta': {
         # Asset SVG da baqueta.
         'asset': 'assets/baqueta.svg',
+        # Cor da baqueta em BGR (#5300C7).
+        'tint_bgr': (199, 0, 83),
         # Altura relativa em funcao do menor lado do canvas.
         'height_pct': 0.26,
         # Largura = height * width_ratio.

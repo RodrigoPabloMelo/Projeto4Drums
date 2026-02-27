@@ -294,9 +294,9 @@ class VirtualDrums:
 
         for info in outside_inputs:
             if self._is_victory(info["landmarks"]):
-                return CMD_SWITCH_PLAYGROUND
-            if self._is_pointing_up(info["landmarks"]):
                 return CMD_SWITCH_MEMORY
+            if self._is_pointing_up(info["landmarks"]):
+                return CMD_SWITCH_PLAYGROUND
         return None
 
     def _detect_command_gesture(
@@ -405,6 +405,122 @@ class VirtualDrums:
             fallback_scale=fallback_scale,
         )
 
+    def _draw_rounded_rect(
+        self,
+        frame: np.ndarray,
+        x: int,
+        y: int,
+        w: int,
+        h: int,
+        radius: int,
+        color_bgr: Tuple[int, int, int],
+    ) -> None:
+        # Retangulo arredondado para componentes de interface.
+        radius = max(1, min(radius, w // 2, h // 2))
+        cv2.rectangle(frame, (x + radius, y), (x + w - radius, y + h), color_bgr, -1, lineType=cv2.LINE_AA)
+        cv2.rectangle(frame, (x, y + radius), (x + w, y + h - radius), color_bgr, -1, lineType=cv2.LINE_AA)
+        cv2.circle(frame, (x + radius, y + radius), radius, color_bgr, -1, lineType=cv2.LINE_AA)
+        cv2.circle(frame, (x + w - radius, y + radius), radius, color_bgr, -1, lineType=cv2.LINE_AA)
+        cv2.circle(frame, (x + radius, y + h - radius), radius, color_bgr, -1, lineType=cv2.LINE_AA)
+        cv2.circle(frame, (x + w - radius, y + h - radius), radius, color_bgr, -1, lineType=cv2.LINE_AA)
+
+    def _draw_quit_hint(self, frame: np.ndarray) -> None:
+        # Mantem apenas a dica de saida no canto superior esquerdo.
+        text = f"{self.quit_key.upper()} para sair"
+        self._draw_text(
+            frame,
+            text,
+            20,
+            40,
+            size=28,
+            color_bgr=(255, 255, 255),
+            align="left",
+            weight="bold",
+            fallback_scale=0.8,
+        )
+
+    def _draw_mode_tabs(self, frame: np.ndarray) -> None:
+        # Barra de modo no topo central com segmento ativo.
+        ui_cfg = CONFIG.get("ui", {})
+        tab_cfg = ui_cfg.get("tab", {})
+        assets_cfg = CONFIG.get("assets", {}).get("mode_icons", {})
+        frame_h, frame_w = frame.shape[:2]
+
+        container_w = int(frame_w * float(tab_cfg.get("container_width_pct", 0.60)))
+        container_h = int(tab_cfg.get("container_height_px", 92))
+        top_margin = int(tab_cfg.get("top_margin_px", 22))
+        radius = int(tab_cfg.get("corner_radius_px", container_h // 2))
+        padding = int(tab_cfg.get("inner_padding_px", 8))
+        container_color = tuple(tab_cfg.get("container_bg_bgr", (245, 245, 245)))
+        active_color = tuple(tab_cfg.get("active_bg_bgr", (199, 0, 83)))
+        active_text_color = tuple(tab_cfg.get("text_active_bgr", (255, 255, 255)))
+        inactive_text_color = tuple(tab_cfg.get("text_inactive_bgr", (199, 0, 83)))
+
+        x = (frame_w - container_w) // 2
+        y = top_margin
+        self._draw_rounded_rect(frame, x, y, container_w, container_h, radius, container_color)
+
+        segment_w = (container_w - (padding * 3)) // 2
+        segment_h = container_h - (padding * 2)
+        left_x = x + padding
+        right_x = left_x + segment_w + padding
+        seg_y = y + padding
+        seg_radius = max(8, radius - padding)
+
+        left_active = self.current_mode == MODE_PLAYGROUND
+        if left_active:
+            self._draw_rounded_rect(frame, left_x, seg_y, segment_w, segment_h, seg_radius, active_color)
+        else:
+            self._draw_rounded_rect(frame, right_x, seg_y, segment_w, segment_h, seg_radius, active_color)
+
+        icon_size = int(segment_h * 0.42)
+        label_size = int(segment_h * 0.52)
+        label_y = seg_y + (segment_h // 2) + int(label_size * 0.15)
+
+        play_icon = assets_cfg.get("playground", "assets/playground.svg")
+        mem_icon = assets_cfg.get("memory", "assets/memory.svg")
+
+        left_icon_center = (left_x + int(segment_w * 0.14), seg_y + segment_h // 2)
+        right_icon_center = (right_x + int(segment_w * 0.14), seg_y + segment_h // 2)
+
+        self.kit.renderer.draw_asset(
+            frame,
+            play_icon,
+            left_icon_center,
+            (icon_size, icon_size),
+            tint_bgr=active_text_color if left_active else inactive_text_color,
+        )
+        self.kit.renderer.draw_asset(
+            frame,
+            mem_icon,
+            right_icon_center,
+            (icon_size, icon_size),
+            tint_bgr=inactive_text_color if left_active else active_text_color,
+        )
+
+        self._draw_text(
+            frame,
+            "Playground",
+            left_x + int(segment_w * 0.22),
+            label_y,
+            size=label_size,
+            color_bgr=active_text_color if left_active else inactive_text_color,
+            align="left",
+            weight="bold",
+            fallback_scale=1.0,
+        )
+        self._draw_text(
+            frame,
+            "Jogo da Memoria",
+            right_x + int(segment_w * 0.22),
+            label_y,
+            size=label_size,
+            color_bgr=inactive_text_color if left_active else active_text_color,
+            align="left",
+            weight="bold",
+            fallback_scale=1.0,
+        )
+
     def _is_hand_raised(self, hand_landmarks) -> bool:
         # Mao levantada quando indicador fica acima do punho.
         margin = float(CONFIG.get("ui", {}).get("hand_raise_margin", 0.02))
@@ -435,7 +551,9 @@ class VirtualDrums:
     def _draw_intro_overlay(self, frame: np.ndarray, now: float) -> np.ndarray:
         # Desenha overlay de intro no centro com logo e instrucoes.
         ui_cfg = CONFIG.get("ui", {})
-        base_alpha = float(ui_cfg.get("intro_overlay_alpha_idle", 0.65))
+        intro_cfg = ui_cfg.get("intro", {})
+        base_alpha = float(intro_cfg.get("panel_opacity", 0.75))
+        text_gap = int(intro_cfg.get("text_gap_px", 16))
         transition_s = float(ui_cfg.get("intro_transition_ms", 650)) / 1000.0
 
         alpha = base_alpha
@@ -446,42 +564,36 @@ class VirtualDrums:
         if alpha <= 0.0:
             return frame
 
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        gray_bgr = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
-        muted = cv2.GaussianBlur(gray_bgr, (11, 11), 0)
-        blended = cv2.addWeighted(frame, 1.0 - alpha, muted, alpha, 0)
+        blended = frame.copy()
+        panel = frame.copy()
+        cv2.rectangle(panel, (0, 0), (frame.shape[1] - 1, frame.shape[0] - 1), (255, 255, 255), -1)
+        cv2.addWeighted(panel, alpha, blended, 1.0 - alpha, 0, blended)
 
         h, w = frame.shape[:2]
-        overlay = blended.copy()
-        panel_radius = int(min(w, h) * 0.21)
-        cv2.circle(
-            overlay,
-            (w // 2, int(h * 0.52)),
-            panel_radius,
-            (238, 238, 238),
-            -1,
-            lineType=cv2.LINE_AA,
-        )
-        cv2.addWeighted(overlay, 0.65, blended, 0.35, 0, blended)
-
-        logo_size = int(min(w, h) * 0.34)
+        logo_h = int(min(w, h) * 0.20)
+        logo_w = int(logo_h * 2.14)
+        logo_center = (w // 2, int(h * 0.49))
         self.kit.renderer.draw_asset(
             blended,
             "assets/logo.svg",
-            (w // 2, int(h * 0.50)),
-            (logo_size, int(logo_size * 0.46)),
-            alpha_scale=max(0.0, min(1.0, alpha * 1.2)),
+            logo_center,
+            (logo_w, logo_h),
+            alpha_scale=max(0.0, min(1.0, 1.0 - ((1.0 - alpha) * 0.3))),
         )
+        logo_bottom = logo_center[1] + (logo_h // 2)
+        intro_label = "Levante as maos para comecar"
+        text_size = max(18, int(min(w, h) * 0.04))
+        _text_w, text_h = self.text_renderer.measure(intro_label, size=text_size, weight="regular")
         self._draw_text(
             blended,
-            "Levante as maos para comecar",
+            intro_label,
             w // 2,
-            int(h * 0.61),
-            size=max(18, int(min(w, h) * 0.042)),
+            logo_bottom + text_gap + text_h,
+            size=text_size,
             color_bgr=(45, 45, 45),
             align="center",
             weight="regular",
-            alpha=max(0.0, min(1.0, alpha * 1.15)),
+            alpha=max(0.0, min(1.0, 1.0 - ((1.0 - alpha) * 0.4))),
             fallback_scale=1.0,
         )
         return blended
@@ -489,41 +601,28 @@ class VirtualDrums:
     def _draw_memory_hud(self, frame, hud: Dict, safe_remaining_s: float = 0.0, countdown_value: Optional[int] = None) -> None:
         # Desenha o HUD do modo memory.
         frame_h, frame_w = frame.shape[:2]
+        self._draw_quit_hint(frame)
         score_line = f"Score: {hud['score']}"
         high_line = f"High Score: {self.session_high_score}"
         self._draw_text(
-            frame, score_line, frame_w // 2, 56, size=40, color_bgr=(255, 255, 255), align="center", weight="bold", fallback_scale=1.0
+            frame, score_line, frame_w // 2, 66, size=40, color_bgr=(255, 255, 255), align="center", weight="bold", fallback_scale=1.0
         )
         self._draw_text(
-            frame, high_line, frame_w // 2, 98, size=28, color_bgr=(255, 255, 255), align="center", weight="regular", fallback_scale=0.75
+            frame, high_line, frame_w // 2, 108, size=28, color_bgr=(255, 255, 255), align="center", weight="regular", fallback_scale=0.75
         )
-
-        lines = [
-            "Mode: Memory",
-            f"Combo: x{hud['combo_multiplier']:.2f}",
-            f"Round: {hud['round']}",
-            f"State: {hud['state']}",
-            f"[{self.switch_mode_key.upper()}] Switch  [{self.quit_key.upper()}] Quit",
-        ]
-        y = 30
-        for line in lines:
-            self._draw_text(
-                frame, line, 20, y + 4, size=26, color_bgr=(255, 255, 255), align="left", weight="regular", fallback_scale=0.72
-            )
-            y += 32
 
         if hud["message"]:
             # Mensagem de game over.
             self._draw_text(
                 frame, f"{hud['message']} [{self.restart_key.upper()}]",
-                20, y + 10, size=30, color_bgr=(0, 0, 255), align="left", weight="bold", fallback_scale=0.9
+                20, 156, size=30, color_bgr=(0, 0, 255), align="left", weight="bold", fallback_scale=0.9
             )
 
         if safe_remaining_s > 0:
             # Indicador de janela segura ativa.
             self._draw_text(
                 frame, f"SAFE ACTIVE: {safe_remaining_s:.1f}s",
-                20, y + 46, size=28, color_bgr=(0, 255, 255), align="left", weight="bold", fallback_scale=0.8
+                20, 188, size=28, color_bgr=(0, 255, 255), align="left", weight="bold", fallback_scale=0.8
             )
 
         if countdown_value is not None:
@@ -540,16 +639,7 @@ class VirtualDrums:
 
     def _draw_playground_hud(self, frame) -> None:
         # Desenha o HUD simples do modo playground.
-        lines = [
-            "Mode: Playground",
-            f"[{self.switch_mode_key.upper()}] Switch to Memory  [{self.quit_key.upper()}] Quit",
-        ]
-        y = 30
-        for line in lines:
-            self._draw_text(
-                frame, line, 20, y + 4, size=28, color_bgr=(255, 255, 255), align="left", weight="regular", fallback_scale=0.75
-            )
-            y += 32
+        self._draw_quit_hint(frame)
 
     def _draw_mode_toast(self, frame, now: float) -> None:
         # Mostra toast temporario com o modo atual.
@@ -699,13 +789,20 @@ class VirtualDrums:
             "color_bgr": tuple(baqueta_cfg.get("stroke_color_bgr", (255, 255, 255))),
             "px": int(baqueta_cfg.get("stroke_px", 2)),
         }
+        tint_bgr = tuple(baqueta_cfg.get("tint_bgr", (199, 0, 83)))
 
         for idx, hand_info in enumerate(hand_inputs[:2]):
             tip_x, tip_y = hand_info["index_pos"]
             side_offset = int(stick_w * 0.4) * (-1 if idx == 0 else 1)
             center = (tip_x + side_offset, tip_y - tip_offset)
             self.kit.renderer.draw_asset(
-                frame, asset_path, center, (stick_w, stick_h), alpha_scale=0.98, stroke=stroke_cfg
+                frame,
+                asset_path,
+                center,
+                (stick_w, stick_h),
+                alpha_scale=0.98,
+                tint_bgr=tint_bgr,
+                stroke=stroke_cfg,
             )
 
     def update_loop(self) -> None:
@@ -840,6 +937,11 @@ class VirtualDrums:
         self.kit.draw(frame, indicator_states)
         self.particles.draw(frame)
         self._draw_baquetas(frame, hand_inputs)
+
+        show_tabs = self.scene_state in (SCENE_TRANSITION, SCENE_GAME)
+        if show_tabs:
+            self._draw_mode_tabs(frame)
+
         if self.scene_state in (SCENE_INTRO, SCENE_TRANSITION):
             frame = self._draw_intro_overlay(frame, current_time)
             if self.scene_state == SCENE_TRANSITION:
@@ -860,6 +962,9 @@ class VirtualDrums:
                     veil = frame.copy()
                     cv2.rectangle(veil, (0, 0), (frame_w - 1, frame_h - 1), (220, 220, 220), -1)
                     cv2.addWeighted(veil, (1.0 - progress) * 0.10, frame, 1.0 - ((1.0 - progress) * 0.10), 0, frame)
+                # Redesenha tabs acima do overlay durante a transicao.
+                self._draw_mode_tabs(frame)
+                self._draw_quit_hint(frame)
         elif memory_hud is not None:
             self._draw_memory_hud(
                 frame,

@@ -50,9 +50,9 @@ class ParticleSystem:
             size = self.rng.uniform(self.size_min, self.size_max)
             jitter = self.rng.randint(-24, 24)
             color = (
-                int(np.clip(self.base_color[0] + jitter, 0, 255)),
-                int(np.clip(self.base_color[1] + jitter, 0, 255)),
-                int(np.clip(self.base_color[2] + jitter, 0, 255)),
+                int(np.clip(self.base_color[0] + jitter, 255, 255)),
+                int(np.clip(self.base_color[1] + jitter, 255, 255)),
+                int(np.clip(self.base_color[2] + jitter, 255, 255)),
             )
             self.particles.append(
                 Particle(
