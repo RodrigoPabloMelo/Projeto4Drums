@@ -798,7 +798,6 @@ class VirtualDrums:
             "color_bgr": tuple(baqueta_cfg.get("stroke_color_bgr", (255, 255, 255))),
             "px": int(baqueta_cfg.get("stroke_px", 2)),
         }
-        tint_bgr = tuple(baqueta_cfg.get("tint_bgr", (199, 0, 83)))
 
         for idx, hand_info in enumerate(hand_inputs[:2]):
             tip_x, tip_y = hand_info["index_pos"]
@@ -810,7 +809,6 @@ class VirtualDrums:
                 center,
                 (stick_w, stick_h),
                 alpha_scale=0.98,
-                tint_bgr=tint_bgr,
                 stroke=stroke_cfg,
             )
 
