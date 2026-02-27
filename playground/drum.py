@@ -6,6 +6,7 @@ import cv2
 import numpy as np
 from pygame import mixer
 
+from config.config import CONFIG
 from playground.svg_renderer import SVGRenderer
 
 # Logger do modulo.
@@ -164,7 +165,14 @@ class Drum:
 
         draw_w = max(1, int(round(self.render_size[0] * scale)))
         draw_h = max(1, int(round(self.render_size[1] * scale)))
-        renderer.draw_asset(frame, self.asset_path, self.center, (draw_w, draw_h))
+        brand_color = tuple(CONFIG.get("ui", {}).get("brand_color_bgr", (0, 53, 168)))
+        renderer.draw_asset(
+            frame,
+            self.asset_path,
+            self.center,
+            (draw_w, draw_h),
+            tint_bgr=brand_color,
+        )
 
     def check_hit(self, hand_pos: Tuple[int, int], hand_vel: float, current_time: float, velocity_threshold: float) -> bool:
         """Verifica se o tambor foi atingido pela posicao e velocidade."""

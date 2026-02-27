@@ -11,6 +11,8 @@ from pygame import mixer
 from config.config import CONFIG
 from playground.drum_kit import DrumKit
 from playground.memory_game import MemoryGameController
+from playground.particles import ParticleSystem
+from playground.text_renderer import TextRenderer
 
 # Logger do modulo.
 logger = logging.getLogger(__name__)
@@ -21,6 +23,9 @@ MODE_MEMORY = "memory"
 CMD_SWITCH_PLAYGROUND = "switch_playground"
 CMD_SWITCH_MEMORY = "switch_memory"
 CMD_RESTART_MEMORY = "restart_memory"
+SCENE_INTRO = "intro"
+SCENE_TRANSITION = "transition"
+SCENE_GAME = "game"
 
 
 class VirtualDrums:
@@ -66,6 +71,16 @@ class VirtualDrums:
         # Efeito visual de falha.
         self.fail_visual_until: float = 0.0
         self.fail_visual_message = "ERROU! GAME OVER"
+        # Renderizadores auxiliares.
+        self.text_renderer = TextRenderer()
+        self.particles = ParticleSystem()
+        # Estado da cena (intro -> transicao -> jogo).
+        self.scene_state = SCENE_INTRO
+        self.intro_started_at: float = 0.0
+        self.intro_trigger_started_at: float = 0.0
+        self.transition_started_at: float = 0.0
+        # Tempo entre frames para simulacao das particulas.
+        self.last_frame_time: float = 0.0
 
     def _reset_memory_safe_guard(self) -> None:
         # Reseta protecoes contra entradas duplicadas no modo memory.
@@ -163,7 +178,14 @@ class VirtualDrums:
                     self.kit.get_drum_count(),
                     CONFIG["memory_game"]
                 )
-                self.memory_game.start_new_run(asyncio.get_event_loop().time())
+                now = asyncio.get_event_loop().time()
+                self.memory_game.start_new_run(now)
+                self.intro_started_at = now
+                self.last_frame_time = now
+            else:
+                now = asyncio.get_event_loop().time()
+                self.intro_started_at = now
+                self.last_frame_time = now
         except Exception as e:
             logger.error(f"Camera initialization failed: {e}")
             raise
@@ -353,31 +375,127 @@ class VirtualDrums:
         self.last_gesture_event[event_key] = current_time
         return drum_index, active_kind
 
+    def _smoothstep(self, t: float) -> float:
+        # Easing suave para transicoes visuais.
+        t = max(0.0, min(1.0, t))
+        return t * t * (3.0 - 2.0 * t)
+
+    def _draw_text(
+        self,
+        frame: np.ndarray,
+        text: str,
+        x: int,
+        y: int,
+        size: int,
+        color_bgr: Tuple[int, int, int],
+        align: str = "left",
+        weight: str = "regular",
+        alpha: float = 1.0,
+        fallback_scale: float = 0.8,
+    ) -> None:
+        self.text_renderer.draw_text(
+            frame=frame,
+            text=text,
+            pos=(x, y),
+            size=size,
+            color_bgr=color_bgr,
+            align=align,
+            weight=weight,
+            alpha=alpha,
+            fallback_scale=fallback_scale,
+        )
+
+    def _is_hand_raised(self, hand_landmarks) -> bool:
+        # Mao levantada quando indicador fica acima do punho.
+        margin = float(CONFIG.get("ui", {}).get("hand_raise_margin", 0.02))
+        return hand_landmarks.landmark[8].y < (hand_landmarks.landmark[0].y - margin)
+
+    def _update_intro_state(self, hand_inputs: List[Dict], now: float) -> None:
+        # Avanca estados intro/transicao com base em duas maos levantadas.
+        ui_cfg = CONFIG.get("ui", {})
+        hold_s = float(ui_cfg.get("intro_hold_ms", 450)) / 1000.0
+        transition_s = float(ui_cfg.get("intro_transition_ms", 650)) / 1000.0
+
+        if self.scene_state == SCENE_INTRO:
+            raised_count = sum(1 for info in hand_inputs if self._is_hand_raised(info["landmarks"]))
+            if raised_count >= 2:
+                if self.intro_trigger_started_at <= 0.0:
+                    self.intro_trigger_started_at = now
+                elif now - self.intro_trigger_started_at >= hold_s:
+                    self.scene_state = SCENE_TRANSITION
+                    self.transition_started_at = now
+            else:
+                self.intro_trigger_started_at = 0.0
+
+        if self.scene_state == SCENE_TRANSITION:
+            progress = (now - self.transition_started_at) / max(transition_s, 1e-4)
+            if progress >= 1.0:
+                self.scene_state = SCENE_GAME
+
+    def _draw_intro_overlay(self, frame: np.ndarray, now: float) -> np.ndarray:
+        # Desenha overlay de intro no centro com logo e instrucoes.
+        ui_cfg = CONFIG.get("ui", {})
+        base_alpha = float(ui_cfg.get("intro_overlay_alpha_idle", 0.65))
+        transition_s = float(ui_cfg.get("intro_transition_ms", 650)) / 1000.0
+
+        alpha = base_alpha
+        if self.scene_state == SCENE_TRANSITION:
+            progress = self._smoothstep((now - self.transition_started_at) / max(transition_s, 1e-4))
+            alpha = base_alpha * (1.0 - progress)
+
+        if alpha <= 0.0:
+            return frame
+
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        gray_bgr = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+        muted = cv2.GaussianBlur(gray_bgr, (11, 11), 0)
+        blended = cv2.addWeighted(frame, 1.0 - alpha, muted, alpha, 0)
+
+        h, w = frame.shape[:2]
+        overlay = blended.copy()
+        panel_radius = int(min(w, h) * 0.21)
+        cv2.circle(
+            overlay,
+            (w // 2, int(h * 0.52)),
+            panel_radius,
+            (238, 238, 238),
+            -1,
+            lineType=cv2.LINE_AA,
+        )
+        cv2.addWeighted(overlay, 0.65, blended, 0.35, 0, blended)
+
+        logo_size = int(min(w, h) * 0.34)
+        self.kit.renderer.draw_asset(
+            blended,
+            "assets/logo.svg",
+            (w // 2, int(h * 0.50)),
+            (logo_size, int(logo_size * 0.46)),
+            alpha_scale=max(0.0, min(1.0, alpha * 1.2)),
+        )
+        self._draw_text(
+            blended,
+            "Levante as maos para comecar",
+            w // 2,
+            int(h * 0.61),
+            size=max(18, int(min(w, h) * 0.042)),
+            color_bgr=(45, 45, 45),
+            align="center",
+            weight="regular",
+            alpha=max(0.0, min(1.0, alpha * 1.15)),
+            fallback_scale=1.0,
+        )
+        return blended
+
     def _draw_memory_hud(self, frame, hud: Dict, safe_remaining_s: float = 0.0, countdown_value: Optional[int] = None) -> None:
         # Desenha o HUD do modo memory.
-        font_scale = CONFIG["memory_game"]["font_scale"]
         frame_h, frame_w = frame.shape[:2]
         score_line = f"Score: {hud['score']}"
         high_line = f"High Score: {self.session_high_score}"
-        score_w, score_h = cv2.getTextSize(score_line, cv2.FONT_HERSHEY_SIMPLEX, 1.0, 2)[0]
-        high_w, _ = cv2.getTextSize(high_line, cv2.FONT_HERSHEY_SIMPLEX, 0.75, 2)[0]
-        cv2.putText(
-            frame,
-            score_line,
-            ((frame_w - score_w) // 2, 32 + score_h),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            1.0,
-            (255, 255, 255),
-            2,
+        self._draw_text(
+            frame, score_line, frame_w // 2, 56, size=40, color_bgr=(255, 255, 255), align="center", weight="bold", fallback_scale=1.0
         )
-        cv2.putText(
-            frame,
-            high_line,
-            ((frame_w - high_w) // 2, 100),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.75,
-            (255, 255, 255),
-            2,
+        self._draw_text(
+            frame, high_line, frame_w // 2, 98, size=28, color_bgr=(255, 255, 255), align="center", weight="regular", fallback_scale=0.75
         )
 
         lines = [
@@ -389,40 +507,36 @@ class VirtualDrums:
         ]
         y = 30
         for line in lines:
-            cv2.putText(frame, line, (20, y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), 2)
+            self._draw_text(
+                frame, line, 20, y + 4, size=26, color_bgr=(255, 255, 255), align="left", weight="regular", fallback_scale=0.72
+            )
             y += 32
 
         if hud["message"]:
             # Mensagem de game over.
-            cv2.putText(
-                frame,
-                f"{hud['message']} [{self.restart_key.upper()}]",
-                (20, y + 10),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.9,
-                (0, 0, 255),
-                2
+            self._draw_text(
+                frame, f"{hud['message']} [{self.restart_key.upper()}]",
+                20, y + 10, size=30, color_bgr=(0, 0, 255), align="left", weight="bold", fallback_scale=0.9
             )
 
         if safe_remaining_s > 0:
             # Indicador de janela segura ativa.
-            cv2.putText(
-                frame,
-                f"SAFE ACTIVE: {safe_remaining_s:.1f}s",
-                (20, y + 46),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.8,
-                (0, 255, 255),
-                2
+            self._draw_text(
+                frame, f"SAFE ACTIVE: {safe_remaining_s:.1f}s",
+                20, y + 46, size=28, color_bgr=(0, 255, 255), align="left", weight="bold", fallback_scale=0.8
             )
 
         if countdown_value is not None:
             # Contagem regressiva centralizada.
             text = str(countdown_value)
-            text_size, _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 3.5, 7)
-            tx = (frame_w - text_size[0]) // 2
-            ty = (frame_h + text_size[1]) // 2
-            cv2.putText(frame, text, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, 3.5, (255, 255, 255), 7)
+            self._draw_text(
+                frame, text, frame_w // 2, frame_h // 2 + 60,
+                size=max(80, int(min(frame_w, frame_h) * 0.22)),
+                color_bgr=(255, 255, 255),
+                align="center",
+                weight="bold",
+                fallback_scale=3.5,
+            )
 
     def _draw_playground_hud(self, frame) -> None:
         # Desenha o HUD simples do modo playground.
@@ -432,7 +546,9 @@ class VirtualDrums:
         ]
         y = 30
         for line in lines:
-            cv2.putText(frame, line, (20, y), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2)
+            self._draw_text(
+                frame, line, 20, y + 4, size=28, color_bgr=(255, 255, 255), align="left", weight="regular", fallback_scale=0.75
+            )
             y += 32
 
     def _draw_mode_toast(self, frame, now: float) -> None:
@@ -445,8 +561,7 @@ class VirtualDrums:
             return
 
         frame_h, frame_w = frame.shape[:2]
-        text_size, _ = cv2.getTextSize(message, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)
-        text_w, text_h = text_size
+        text_w, text_h = self.text_renderer.measure(message, size=28, weight="bold")
         x = max((frame_w - text_w) // 2, 10)
         y = max(frame_h - 30, 30)
 
@@ -458,7 +573,9 @@ class VirtualDrums:
         overlay = frame.copy()
         cv2.rectangle(overlay, (panel_x1, panel_y1), (panel_x2, panel_y2), (20, 20, 20), -1)
         cv2.addWeighted(overlay, 0.55, frame, 0.45, 0, frame)
-        cv2.putText(frame, message, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+        self._draw_text(
+            frame, message, x, y, size=28, color_bgr=(255, 255, 255), align="left", weight="bold", fallback_scale=0.8
+        )
 
     def _draw_failure_effect(self, frame: np.ndarray, now: float) -> np.ndarray:
         # Aplica overlay vermelho e tremor quando houver falha.
@@ -477,11 +594,17 @@ class VirtualDrums:
         transform = np.float32([[1, 0, dx], [0, 1, dy]])
         shaken = cv2.warpAffine(frame, transform, (frame_w, frame_h), borderMode=cv2.BORDER_REFLECT)
 
-        text = self.fail_visual_message
-        text_size, _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 1.4, 4)
-        tx = (frame_w - text_size[0]) // 2
-        ty = (frame_h + text_size[1]) // 2
-        cv2.putText(shaken, text, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, 1.4, (255, 255, 255), 4)
+        self._draw_text(
+            shaken,
+            self.fail_visual_message,
+            frame_w // 2,
+            frame_h // 2 + 24,
+            size=max(42, int(min(frame_w, frame_h) * 0.08)),
+            color_bgr=(255, 255, 255),
+            align="center",
+            weight="bold",
+            fallback_scale=1.4,
+        )
         return shaken
 
     def _apply_command(self, command: Optional[str], now: float) -> None:
@@ -571,12 +694,19 @@ class VirtualDrums:
         else:
             stick_w = max(8, int(stick_h * baqueta_cfg.get("width_ratio", 0.09)))
         tip_offset = int(stick_h * baqueta_cfg.get("tip_offset_pct", 0.18))
+        stroke_cfg = {
+            "enabled": bool(baqueta_cfg.get("stroke_enabled", True)),
+            "color_bgr": tuple(baqueta_cfg.get("stroke_color_bgr", (255, 255, 255))),
+            "px": int(baqueta_cfg.get("stroke_px", 2)),
+        }
 
         for idx, hand_info in enumerate(hand_inputs[:2]):
             tip_x, tip_y = hand_info["index_pos"]
             side_offset = int(stick_w * 0.4) * (-1 if idx == 0 else 1)
             center = (tip_x + side_offset, tip_y - tip_offset)
-            self.kit.renderer.draw_asset(frame, asset_path, center, (stick_w, stick_h), alpha_scale=0.98)
+            self.kit.renderer.draw_asset(
+                frame, asset_path, center, (stick_w, stick_h), alpha_scale=0.98, stroke=stroke_cfg
+            )
 
     def update_loop(self) -> None:
         """Processa um frame do video."""
@@ -599,7 +729,9 @@ class VirtualDrums:
         frame = self._build_synthetic_canvas((frame_w, frame_h))
 
         current_time = asyncio.get_event_loop().time()
-        zone_events: List[Tuple[int, str]] = []
+        dt_s = max(0.0, current_time - self.last_frame_time) if self.last_frame_time > 0.0 else 1.0 / 60.0
+        self.last_frame_time = current_time
+        zone_events_detailed: List[Tuple[int, str, Tuple[int, int]]] = []
         hand_inputs: List[Dict] = []
 
         if result.multi_hand_landmarks:
@@ -615,11 +747,15 @@ class VirtualDrums:
                     "frame_h": frame_h,
                 })
 
-        # Detecta comando por gesto (trocar modo, reiniciar, etc).
-        command = self._detect_command_gesture(hand_inputs, current_time)
-        if command:
-            self._apply_command(command, current_time)
-        else:
+        self._update_intro_state(hand_inputs, current_time)
+        allow_gameplay_input = self.scene_state == SCENE_GAME
+        if allow_gameplay_input:
+            # Detecta comando por gesto (trocar modo, reiniciar, etc).
+            command = self._detect_command_gesture(hand_inputs, current_time)
+            if command:
+                self._apply_command(command, current_time)
+
+        if allow_gameplay_input:
             for info in hand_inputs:
                 idx = info["hand_idx"]
                 hand_landmarks = info["landmarks"]
@@ -634,33 +770,41 @@ class VirtualDrums:
                 # Detecta strike baseado em velocidade e posicao.
                 strike_idx = self.kit.get_hit_drum_index_by_strike((x, y), vel, current_time)
                 if strike_idx is not None:
-                    zone_events.append((strike_idx, "strike"))
+                    zone_events_detailed.append((strike_idx, "strike", (x, y)))
 
                 # Detecta eventos por gesto (pinch/fist) sobre um tambor.
                 gesture_event = self._detect_gesture_zone_event(
                     idx, hand_landmarks, (x, y), w, h, current_time
                 )
                 if gesture_event:
-                    zone_events.append(gesture_event)
+                    zone_events_detailed.append((gesture_event[0], gesture_event[1], (x, y)))
 
         indicator_states = None
         memory_hud: Optional[Dict] = None
         countdown_value: Optional[int] = None
         safe_remaining = 0.0
         draw_playground_hud = False
+        emitted_positions: List[Tuple[int, int]] = []
 
         # Remove eventos duplicados para o mesmo tambor no mesmo frame.
         dedup_events: List[Tuple[int, str]] = []
+        dedup_event_positions: List[Tuple[int, str, Tuple[int, int]]] = []
         seen = set()
-        for event in zone_events:
+        for drum_index, source, hit_pos in zone_events_detailed:
+            event = (drum_index, source)
             if event[0] in seen:
                 continue
             dedup_events.append(event)
             seen.add(event[0])
+            dedup_event_positions.append((drum_index, source, hit_pos))
 
-        if self.current_mode == MODE_MEMORY and self.memory_game:
+        if allow_gameplay_input and self.current_mode == MODE_MEMORY and self.memory_game:
             # Aplica janela segura e atualiza o jogo de memoria.
             safe_events = self._apply_memory_safe_window(dedup_events, current_time)
+            safe_indices = {event[0] for event in safe_events}
+            for drum_index, _source, hit_pos in dedup_event_positions:
+                if drum_index in safe_indices:
+                    emitted_positions.append(hit_pos)
             game_render_data = self.memory_game.update(current_time, safe_events)
             indicator_states = game_render_data["indicator_states"]
             # Toca tambores indicados pelo jogo.
@@ -679,17 +823,44 @@ class VirtualDrums:
             memory_hud = game_render_data["hud"]
             safe_remaining = max(0.0, self.memory_safe_until - current_time)
             countdown_value = game_render_data.get("countdown_value")
-        else:
+        elif allow_gameplay_input:
             # Modo livre: toca tambores diretamente.
             for drum_index, _source in dedup_events:
                 self.kit.play_drum_by_index(drum_index, current_time)
+            emitted_positions.extend([hit_pos for _idx, _src, hit_pos in dedup_event_positions])
             if CONFIG.get("playground", {}).get("minimal_hud", True):
                 draw_playground_hud = True
 
+        if allow_gameplay_input and self.particles.enabled:
+            for hit_pos in emitted_positions:
+                self.particles.emit_burst(hit_pos[0], hit_pos[1])
+        self.particles.update(dt_s)
+
         # Desenha tambores e overlays.
         self.kit.draw(frame, indicator_states)
+        self.particles.draw(frame)
         self._draw_baquetas(frame, hand_inputs)
-        if memory_hud is not None:
+        if self.scene_state in (SCENE_INTRO, SCENE_TRANSITION):
+            frame = self._draw_intro_overlay(frame, current_time)
+            if self.scene_state == SCENE_TRANSITION:
+                progress = self._smoothstep(
+                    (current_time - self.transition_started_at)
+                    / max(float(CONFIG.get("ui", {}).get("intro_transition_ms", 650)) / 1000.0, 1e-4)
+                )
+                if memory_hud is not None:
+                    self._draw_memory_hud(
+                        frame,
+                        memory_hud,
+                        safe_remaining_s=safe_remaining,
+                        countdown_value=countdown_value,
+                    )
+                elif draw_playground_hud:
+                    self._draw_playground_hud(frame)
+                if progress < 1.0:
+                    veil = frame.copy()
+                    cv2.rectangle(veil, (0, 0), (frame_w - 1, frame_h - 1), (220, 220, 220), -1)
+                    cv2.addWeighted(veil, (1.0 - progress) * 0.10, frame, 1.0 - ((1.0 - progress) * 0.10), 0, frame)
+        elif memory_hud is not None:
             self._draw_memory_hud(
                 frame,
                 memory_hud,

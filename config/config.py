@@ -22,6 +22,38 @@ CONFIG = {
         # Mostra HUD minimo quando True.
         'minimal_hud': True
     },
+    # Configuracoes visuais globais.
+    'ui': {
+        # Cor principal da marca para o kit.
+        'brand_color_hex': '#A83500',
+        # OpenCV usa BGR.
+        'brand_color_bgr': (0, 53, 168),
+        # Opacidade base do overlay da intro.
+        'intro_overlay_alpha_idle': 0.65,
+        # Duracao da transicao intro -> jogo.
+        'intro_transition_ms': 650,
+        # Tempo minimo com duas maos levantadas para iniciar.
+        'intro_hold_ms': 450,
+        # Limite em Y para considerar mao levantada (indicador acima do punho).
+        'hand_raise_margin': 0.02,
+    },
+    # Configuracoes de tipografia.
+    'fonts': {
+        'instrument_sans_regular': 'assets/fonts/InstrumentSans-Regular.ttf',
+        'instrument_sans_bold': 'assets/fonts/InstrumentSans-Bold.ttf',
+    },
+    # Configuracoes do sistema de particulas.
+    'particles': {
+        'enabled': True,
+        'burst_count': 16,
+        'speed_min': 130.0,
+        'speed_max': 320.0,
+        'lifetime_ms': 380,
+        'size_min': 2.0,
+        'size_max': 5.2,
+        'gravity': 520.0,
+        'color_bgr': (0, 53, 168),
+    },
     # Configuracoes para comandos por gestos.
     'gesture_controls': {
         # Liga/desliga reconhecimento de gestos de comando.
@@ -56,6 +88,10 @@ CONFIG = {
         'width_ratio': 0.09,
         # Distancia vertical do centro da baqueta para a ponta do indicador.
         'tip_offset_pct': 0.18,
+        # Stroke branco ao redor da baqueta.
+        'stroke_enabled': True,
+        'stroke_color_bgr': (255, 255, 255),
+        'stroke_px': 2,
     },
     # Lista de tambores em visao superior.
     'drums': [
