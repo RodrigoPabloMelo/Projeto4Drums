@@ -121,12 +121,10 @@ class VirtualDrums:
             if force_new_run:
                 self.memory_game.start_new_run(now)
                 self._reset_memory_safe_guard()
-            self.mode_toast = ("Switched to Memory", now + 1.0)
             return
 
         self.current_mode = MODE_PLAYGROUND
         self._reset_memory_safe_guard()
-        self.mode_toast = ("Switched to Playground", now + 1.0)
 
     def _key_matches(self, key_code: int, key_name: str) -> bool:
         # Compara tecla pressionada com a configurada.
@@ -440,7 +438,7 @@ class VirtualDrums:
         )
 
     def _draw_mode_tabs(self, frame: np.ndarray) -> None:
-        # Barra de modo no topo central com segmento ativo.
+        # Barra de modo no rodape central com segmento ativo.
         ui_cfg = CONFIG.get("ui", {})
         tab_cfg = ui_cfg.get("tab", {})
         assets_cfg = CONFIG.get("assets", {}).get("mode_icons", {})
@@ -448,16 +446,17 @@ class VirtualDrums:
 
         container_w = int(frame_w * float(tab_cfg.get("container_width_pct", 0.60)))
         container_h = int(tab_cfg.get("container_height_px", 92))
-        top_margin = int(tab_cfg.get("top_margin_px", 22))
+        bottom_margin = int(tab_cfg.get("bottom_margin_px", 26))
         radius = int(tab_cfg.get("corner_radius_px", container_h // 2))
         padding = int(tab_cfg.get("inner_padding_px", 8))
+        icon_gap = int(tab_cfg.get("icon_text_gap_px", 10))
         container_color = tuple(tab_cfg.get("container_bg_bgr", (245, 245, 245)))
         active_color = tuple(tab_cfg.get("active_bg_bgr", (199, 0, 83)))
         active_text_color = tuple(tab_cfg.get("text_active_bgr", (255, 255, 255)))
         inactive_text_color = tuple(tab_cfg.get("text_inactive_bgr", (199, 0, 83)))
 
         x = (frame_w - container_w) // 2
-        y = top_margin
+        y = frame_h - container_h - bottom_margin
         self._draw_rounded_rect(frame, x, y, container_w, container_h, radius, container_color)
 
         segment_w = (container_w - (padding * 3)) // 2
@@ -474,14 +473,24 @@ class VirtualDrums:
             self._draw_rounded_rect(frame, right_x, seg_y, segment_w, segment_h, seg_radius, active_color)
 
         icon_size = int(segment_h * 0.42)
-        label_size = int(segment_h * 0.52)
-        label_y = seg_y + (segment_h // 2) + int(label_size * 0.15)
+        label_size = int(segment_h * 0.50)
+        text_play = "Playground"
+        text_memory = "Jogo da Memoria"
+        text_play_w, text_play_h = self.text_renderer.measure(text_play, size=label_size, weight="bold")
+        text_mem_w, text_mem_h = self.text_renderer.measure(text_memory, size=label_size, weight="bold")
 
         play_icon = assets_cfg.get("playground", "assets/playground.svg")
         mem_icon = assets_cfg.get("memory", "assets/memory.svg")
 
-        left_icon_center = (left_x + int(segment_w * 0.14), seg_y + segment_h // 2)
-        right_icon_center = (right_x + int(segment_w * 0.14), seg_y + segment_h // 2)
+        group_play_w = icon_size + icon_gap + text_play_w
+        group_mem_w = icon_size + icon_gap + text_mem_w
+        play_group_x = left_x + max(0, (segment_w - group_play_w) // 2)
+        mem_group_x = right_x + max(0, (segment_w - group_mem_w) // 2)
+        center_y = seg_y + segment_h // 2
+        label_play_y = center_y + (text_play_h // 2)
+        label_mem_y = center_y + (text_mem_h // 2)
+        left_icon_center = (play_group_x + (icon_size // 2), center_y)
+        right_icon_center = (mem_group_x + (icon_size // 2), center_y)
 
         self.kit.renderer.draw_asset(
             frame,
@@ -500,9 +509,9 @@ class VirtualDrums:
 
         self._draw_text(
             frame,
-            "Playground",
-            left_x + int(segment_w * 0.22),
-            label_y,
+            text_play,
+            play_group_x + icon_size + icon_gap,
+            label_play_y,
             size=label_size,
             color_bgr=active_text_color if left_active else inactive_text_color,
             align="left",
@@ -511,9 +520,9 @@ class VirtualDrums:
         )
         self._draw_text(
             frame,
-            "Jogo da Memoria",
-            right_x + int(segment_w * 0.22),
-            label_y,
+            text_memory,
+            mem_group_x + icon_size + icon_gap,
+            label_mem_y,
             size=label_size,
             color_bgr=inactive_text_color if left_active else active_text_color,
             align="left",
