@@ -28,3 +28,30 @@ Aplicativo de bateria virtual com câmera usando MediaPipe + OpenCV + Pygame.
 - Em cada rodada do `Memory Game`, há contagem regressiva de `3 segundos` antes de mostrar a sequência.
 - O `Memory Game` toca som de erro ao falhar e som de sucesso ao completar uma sequência.
 - O score aparece no topo central e o high score é mantido durante a sessão atual.
+
+## Gerar executável (macOS/Linux)
+
+1. Sincronize dependências do projeto:
+```bash
+uv sync
+```
+
+2. Gere o executável:
+```bash
+./scripts/build_executable.sh
+```
+
+3. Resultado do build:
+- `dist/Drumble/Drumble` (modo padrão `onedir`)
+
+### Opções úteis
+
+- Build em arquivo único:
+```bash
+BUILD_MODE=onefile ./scripts/build_executable.sh
+```
+
+- Definir outro nome de app:
+```bash
+APP_NAME=MeuDrumGame ./scripts/build_executable.sh
+```

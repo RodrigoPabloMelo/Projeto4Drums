@@ -1,20 +1,18 @@
-import logging
-from typing import Optional
-
-from config.config import CONFIG
-
-logger = logging.getLogger(__name__)
-
 import asyncio
+import logging
 import math
 from typing import Dict, List, Optional, Tuple
+
 import cv2
 import mediapipe as mp
-from pygame import mixer
 import numpy as np
+from pygame import mixer
+
+from config.config import CONFIG
 from playground.drum_kit import DrumKit
 from playground.memory_game import MemoryGameController
-from config.config import CONFIG
+from playground.particles import ParticleSystem
+from playground.text_renderer import TextRenderer
 
 # Logger do modulo.
 logger = logging.getLogger(__name__)
@@ -25,6 +23,9 @@ MODE_MEMORY = "memory"
 CMD_SWITCH_PLAYGROUND = "switch_playground"
 CMD_SWITCH_MEMORY = "switch_memory"
 CMD_RESTART_MEMORY = "restart_memory"
+SCENE_INTRO = "intro"
+SCENE_TRANSITION = "transition"
+SCENE_GAME = "game"
 
 
 class VirtualDrums:
@@ -32,7 +33,6 @@ class VirtualDrums:
     def __init__(self):
         # Componentes do MediaPipe.
         self.mp_hands = mp.solutions.hands
-        self.mp_draw = mp.solutions.drawing_utils
         self.hands = None
         # Camera e kit de tambores.
         self.cap = None
@@ -71,6 +71,16 @@ class VirtualDrums:
         # Efeito visual de falha.
         self.fail_visual_until: float = 0.0
         self.fail_visual_message = "ERROU! GAME OVER"
+        # Renderizadores auxiliares.
+        self.text_renderer = TextRenderer()
+        self.particles = ParticleSystem()
+        # Estado da cena (intro -> transicao -> jogo).
+        self.scene_state = SCENE_INTRO
+        self.intro_started_at: float = 0.0
+        self.intro_trigger_started_at: float = 0.0
+        self.transition_started_at: float = 0.0
+        # Tempo entre frames para simulacao das particulas.
+        self.last_frame_time: float = 0.0
 
     def _reset_memory_safe_guard(self) -> None:
         # Reseta protecoes contra entradas duplicadas no modo memory.
@@ -111,12 +121,10 @@ class VirtualDrums:
             if force_new_run:
                 self.memory_game.start_new_run(now)
                 self._reset_memory_safe_guard()
-            self.mode_toast = ("Switched to Memory", now + 1.0)
             return
 
         self.current_mode = MODE_PLAYGROUND
         self._reset_memory_safe_guard()
-        self.mode_toast = ("Switched to Playground", now + 1.0)
 
     def _key_matches(self, key_code: int, key_name: str) -> bool:
         # Compara tecla pressionada com a configurada.
@@ -160,7 +168,8 @@ class VirtualDrums:
             success_path = CONFIG["memory_game"].get("success_sound", "sounds/success_1.wav")
             self.success_sound = self._load_optional_sound(success_path)
             if self.success_sound is None:
-                self.success_sound = self._load_optional_sound("sounds/crash_1.wav")
+                crash_fallback = CONFIG.get("sound_bindings", {}).get("crash", "sounds/crash_1.wav")
+                self.success_sound = self._load_optional_sound(crash_fallback)
             # Define modo inicial e cria controlador se necessario.
             self.current_mode = self._resolve_initial_mode()
             if self.current_mode == MODE_MEMORY:
@@ -168,7 +177,14 @@ class VirtualDrums:
                     self.kit.get_drum_count(),
                     CONFIG["memory_game"]
                 )
-                self.memory_game.start_new_run(asyncio.get_event_loop().time())
+                now = asyncio.get_event_loop().time()
+                self.memory_game.start_new_run(now)
+                self.intro_started_at = now
+                self.last_frame_time = now
+            else:
+                now = asyncio.get_event_loop().time()
+                self.intro_started_at = now
+                self.last_frame_time = now
         except Exception as e:
             logger.error(f"Camera initialization failed: {e}")
             raise
@@ -277,9 +293,9 @@ class VirtualDrums:
 
         for info in outside_inputs:
             if self._is_victory(info["landmarks"]):
-                return CMD_SWITCH_PLAYGROUND
-            if self._is_pointing_up(info["landmarks"]):
                 return CMD_SWITCH_MEMORY
+            if self._is_pointing_up(info["landmarks"]):
+                return CMD_SWITCH_PLAYGROUND
         return None
 
     def _detect_command_gesture(
@@ -358,87 +374,282 @@ class VirtualDrums:
         self.last_gesture_event[event_key] = current_time
         return drum_index, active_kind
 
-    def _draw_memory_hud(self, frame, hud: Dict, safe_remaining_s: float = 0.0, countdown_value: Optional[int] = None) -> None:
-        # Desenha o HUD do modo memory.
-        font_scale = CONFIG["memory_game"]["font_scale"]
-        frame_h, frame_w = frame.shape[:2]
-        score_line = f"Score: {hud['score']}"
-        high_line = f"High Score: {self.session_high_score}"
-        score_w, score_h = cv2.getTextSize(score_line, cv2.FONT_HERSHEY_SIMPLEX, 1.0, 2)[0]
-        high_w, _ = cv2.getTextSize(high_line, cv2.FONT_HERSHEY_SIMPLEX, 0.75, 2)[0]
-        cv2.putText(
-            frame,
-            score_line,
-            ((frame_w - score_w) // 2, 32 + score_h),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            1.0,
-            (255, 255, 255),
-            2,
-        )
-        cv2.putText(
-            frame,
-            high_line,
-            ((frame_w - high_w) // 2, 100),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.75,
-            (255, 255, 255),
-            2,
+    def _smoothstep(self, t: float) -> float:
+        # Easing suave para transicoes visuais.
+        t = max(0.0, min(1.0, t))
+        return t * t * (3.0 - 2.0 * t)
+
+    def _draw_text(
+        self,
+        frame: np.ndarray,
+        text: str,
+        x: int,
+        y: int,
+        size: int,
+        color_bgr: Tuple[int, int, int],
+        align: str = "left",
+        weight: str = "regular",
+        alpha: float = 1.0,
+        fallback_scale: float = 0.8,
+    ) -> None:
+        self.text_renderer.draw_text(
+            frame=frame,
+            text=text,
+            pos=(x, y),
+            size=size,
+            color_bgr=color_bgr,
+            align=align,
+            weight=weight,
+            alpha=alpha,
+            fallback_scale=fallback_scale,
         )
 
-        lines = [
-            "Mode: Memory",
-            f"Combo: x{hud['combo_multiplier']:.2f}",
-            f"Round: {hud['round']}",
-            f"State: {hud['state']}",
-            f"[{self.switch_mode_key.upper()}] Switch  [{self.quit_key.upper()}] Quit",
-        ]
-        y = 30
-        for line in lines:
-            cv2.putText(frame, line, (20, y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), 2)
-            y += 32
+    def _draw_rounded_rect(
+        self,
+        frame: np.ndarray,
+        x: int,
+        y: int,
+        w: int,
+        h: int,
+        radius: int,
+        color_bgr: Tuple[int, int, int],
+    ) -> None:
+        # Retangulo arredondado para componentes de interface.
+        radius = max(1, min(radius, w // 2, h // 2))
+        cv2.rectangle(frame, (x + radius, y), (x + w - radius, y + h), color_bgr, -1, lineType=cv2.LINE_AA)
+        cv2.rectangle(frame, (x, y + radius), (x + w, y + h - radius), color_bgr, -1, lineType=cv2.LINE_AA)
+        cv2.circle(frame, (x + radius, y + radius), radius, color_bgr, -1, lineType=cv2.LINE_AA)
+        cv2.circle(frame, (x + w - radius, y + radius), radius, color_bgr, -1, lineType=cv2.LINE_AA)
+        cv2.circle(frame, (x + radius, y + h - radius), radius, color_bgr, -1, lineType=cv2.LINE_AA)
+        cv2.circle(frame, (x + w - radius, y + h - radius), radius, color_bgr, -1, lineType=cv2.LINE_AA)
+
+    def _draw_quit_hint(self, frame: np.ndarray) -> None:
+        # Mantem apenas a dica de saida no canto superior esquerdo.
+        text = f"{self.quit_key.upper()} para sair"
+        self._draw_text(
+            frame,
+            text,
+            20,
+            40,
+            size=28,
+            color_bgr=(255, 255, 255),
+            align="left",
+            weight="bold",
+            fallback_scale=0.8,
+        )
+
+    def _draw_mode_tabs(self, frame: np.ndarray) -> None:
+        # Barra de modo no rodape central com segmento ativo.
+        ui_cfg = CONFIG.get("ui", {})
+        tab_cfg = ui_cfg.get("tab", {})
+        assets_cfg = CONFIG.get("assets", {}).get("mode_icons", {})
+        frame_h, frame_w = frame.shape[:2]
+
+        container_w = int(frame_w * float(tab_cfg.get("container_width_pct", 0.60)))
+        container_h = int(tab_cfg.get("container_height_px", 92))
+        bottom_margin = int(tab_cfg.get("bottom_margin_px", 26))
+        radius = int(tab_cfg.get("corner_radius_px", container_h // 2))
+        padding = int(tab_cfg.get("inner_padding_px", 8))
+        icon_gap = int(tab_cfg.get("icon_text_gap_px", 10))
+        container_color = tuple(tab_cfg.get("container_bg_bgr", (245, 245, 245)))
+        active_color = tuple(tab_cfg.get("active_bg_bgr", (199, 0, 83)))
+        active_text_color = tuple(tab_cfg.get("text_active_bgr", (255, 255, 255)))
+        inactive_text_color = tuple(tab_cfg.get("text_inactive_bgr", (199, 0, 83)))
+
+        x = (frame_w - container_w) // 2
+        y = frame_h - container_h - bottom_margin
+        self._draw_rounded_rect(frame, x, y, container_w, container_h, radius, container_color)
+
+        segment_w = (container_w - (padding * 3)) // 2
+        segment_h = container_h - (padding * 2)
+        left_x = x + padding
+        right_x = left_x + segment_w + padding
+        seg_y = y + padding
+        seg_radius = max(8, radius - padding)
+
+        left_active = self.current_mode == MODE_PLAYGROUND
+        if left_active:
+            self._draw_rounded_rect(frame, left_x, seg_y, segment_w, segment_h, seg_radius, active_color)
+        else:
+            self._draw_rounded_rect(frame, right_x, seg_y, segment_w, segment_h, seg_radius, active_color)
+
+        icon_size = int(segment_h * 0.42)
+        label_size = int(segment_h * 0.50)
+        text_play = "Playground"
+        text_memory = "Jogo da Memoria"
+        text_play_w, text_play_h = self.text_renderer.measure(text_play, size=label_size, weight="bold")
+        text_mem_w, text_mem_h = self.text_renderer.measure(text_memory, size=label_size, weight="bold")
+
+        play_icon = assets_cfg.get("playground", "assets/playground.svg")
+        mem_icon = assets_cfg.get("memory", "assets/memory.svg")
+
+        group_play_w = icon_size + icon_gap + text_play_w
+        group_mem_w = icon_size + icon_gap + text_mem_w
+        play_group_x = left_x + max(0, (segment_w - group_play_w) // 2)
+        mem_group_x = right_x + max(0, (segment_w - group_mem_w) // 2)
+        center_y = seg_y + segment_h // 2
+        label_play_y = center_y + (text_play_h // 2)
+        label_mem_y = center_y + (text_mem_h // 2)
+        left_icon_center = (play_group_x + (icon_size // 2), center_y)
+        right_icon_center = (mem_group_x + (icon_size // 2), center_y)
+
+        self.kit.renderer.draw_asset(
+            frame,
+            play_icon,
+            left_icon_center,
+            (icon_size, icon_size),
+            tint_bgr=active_text_color if left_active else inactive_text_color,
+        )
+        self.kit.renderer.draw_asset(
+            frame,
+            mem_icon,
+            right_icon_center,
+            (icon_size, icon_size),
+            tint_bgr=inactive_text_color if left_active else active_text_color,
+        )
+
+        self._draw_text(
+            frame,
+            text_play,
+            play_group_x + icon_size + icon_gap,
+            label_play_y,
+            size=label_size,
+            color_bgr=active_text_color if left_active else inactive_text_color,
+            align="left",
+            weight="bold",
+            fallback_scale=1.0,
+        )
+        self._draw_text(
+            frame,
+            text_memory,
+            mem_group_x + icon_size + icon_gap,
+            label_mem_y,
+            size=label_size,
+            color_bgr=inactive_text_color if left_active else active_text_color,
+            align="left",
+            weight="bold",
+            fallback_scale=1.0,
+        )
+
+    def _is_hand_raised(self, hand_landmarks) -> bool:
+        # Mao levantada quando indicador fica acima do punho.
+        margin = float(CONFIG.get("ui", {}).get("hand_raise_margin", 0.02))
+        return hand_landmarks.landmark[8].y < (hand_landmarks.landmark[0].y - margin)
+
+    def _update_intro_state(self, hand_inputs: List[Dict], now: float) -> None:
+        # Avanca estados intro/transicao com base em duas maos levantadas.
+        ui_cfg = CONFIG.get("ui", {})
+        hold_s = float(ui_cfg.get("intro_hold_ms", 450)) / 1000.0
+        transition_s = float(ui_cfg.get("intro_transition_ms", 650)) / 1000.0
+
+        if self.scene_state == SCENE_INTRO:
+            raised_count = sum(1 for info in hand_inputs if self._is_hand_raised(info["landmarks"]))
+            if raised_count >= 2:
+                if self.intro_trigger_started_at <= 0.0:
+                    self.intro_trigger_started_at = now
+                elif now - self.intro_trigger_started_at >= hold_s:
+                    self.scene_state = SCENE_TRANSITION
+                    self.transition_started_at = now
+            else:
+                self.intro_trigger_started_at = 0.0
+
+        if self.scene_state == SCENE_TRANSITION:
+            progress = (now - self.transition_started_at) / max(transition_s, 1e-4)
+            if progress >= 1.0:
+                self.scene_state = SCENE_GAME
+
+    def _draw_intro_overlay(self, frame: np.ndarray, now: float) -> np.ndarray:
+        # Desenha overlay de intro no centro com logo e instrucoes.
+        ui_cfg = CONFIG.get("ui", {})
+        intro_cfg = ui_cfg.get("intro", {})
+        base_alpha = float(intro_cfg.get("panel_opacity", 0.75))
+        text_gap = int(intro_cfg.get("text_gap_px", 16))
+        transition_s = float(ui_cfg.get("intro_transition_ms", 650)) / 1000.0
+
+        alpha = base_alpha
+        if self.scene_state == SCENE_TRANSITION:
+            progress = self._smoothstep((now - self.transition_started_at) / max(transition_s, 1e-4))
+            alpha = base_alpha * (1.0 - progress)
+
+        if alpha <= 0.0:
+            return frame
+
+        blended = frame.copy()
+        panel = frame.copy()
+        cv2.rectangle(panel, (0, 0), (frame.shape[1] - 1, frame.shape[0] - 1), (255, 255, 255), -1)
+        cv2.addWeighted(panel, alpha, blended, 1.0 - alpha, 0, blended)
+
+        h, w = frame.shape[:2]
+        logo_h = int(min(w, h) * 0.20)
+        logo_w = int(logo_h * 2.14)
+        logo_center = (w // 2, int(h * 0.49))
+        self.kit.renderer.draw_asset(
+            blended,
+            CONFIG.get("assets", {}).get("logo", "assets/logo.svg"),
+            logo_center,
+            (logo_w, logo_h),
+            alpha_scale=max(0.0, min(1.0, 1.0 - ((1.0 - alpha) * 0.3))),
+        )
+        logo_bottom = logo_center[1] + (logo_h // 2)
+        intro_label = "Levante as maos para comecar"
+        text_size = max(18, int(min(w, h) * 0.04))
+        _text_w, text_h = self.text_renderer.measure(intro_label, size=text_size, weight="regular")
+        self._draw_text(
+            blended,
+            intro_label,
+            w // 2,
+            logo_bottom + text_gap + text_h,
+            size=text_size,
+            color_bgr=(45, 45, 45),
+            align="center",
+            weight="regular",
+            alpha=max(0.0, min(1.0, 1.0 - ((1.0 - alpha) * 0.4))),
+            fallback_scale=1.0,
+        )
+        return blended
+
+    def _draw_memory_hud(self, frame, hud: Dict, safe_remaining_s: float = 0.0, countdown_value: Optional[int] = None) -> None:
+        # Desenha o HUD do modo memory.
+        frame_h, frame_w = frame.shape[:2]
+        self._draw_quit_hint(frame)
+        score_line = f"Score: {hud['score']}"
+        high_line = f"High Score: {self.session_high_score}"
+        self._draw_text(
+            frame, score_line, frame_w // 2, 66, size=40, color_bgr=(0, 140, 255), align="center", weight="bold", fallback_scale=1.0
+        )
+        self._draw_text(
+            frame, high_line, frame_w // 2, 108, size=28, color_bgr=(0, 0, 0), align="center", weight="regular", fallback_scale=0.75
+        )
 
         if hud["message"]:
             # Mensagem de game over.
-            cv2.putText(
-                frame,
-                f"{hud['message']} [{self.restart_key.upper()}]",
-                (20, y + 10),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.9,
-                (0, 0, 255),
-                2
+            self._draw_text(
+                frame, f"{hud['message']} [{self.restart_key.upper()}]",
+                20, 156, size=30, color_bgr=(0, 0, 255), align="left", weight="bold", fallback_scale=0.9
             )
 
         if safe_remaining_s > 0:
             # Indicador de janela segura ativa.
-            cv2.putText(
-                frame,
-                f"SAFE ACTIVE: {safe_remaining_s:.1f}s",
-                (20, y + 46),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.8,
-                (0, 255, 255),
-                2
+            self._draw_text(
+                frame, f"SAFE ACTIVE: {safe_remaining_s:.1f}s",
+                20, 188, size=28, color_bgr=(0, 255, 255), align="left", weight="bold", fallback_scale=0.8
             )
 
         if countdown_value is not None:
             # Contagem regressiva centralizada.
             text = str(countdown_value)
-            text_size, _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 3.5, 7)
-            tx = (frame_w - text_size[0]) // 2
-            ty = (frame_h + text_size[1]) // 2
-            cv2.putText(frame, text, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, 3.5, (255, 255, 255), 7)
+            self._draw_text(
+                frame, text, frame_w // 2, frame_h // 2 + 60,
+                size=max(80, int(min(frame_w, frame_h) * 0.22)),
+                color_bgr=(255, 255, 255),
+                align="center",
+                weight="bold",
+                fallback_scale=3.5,
+            )
 
     def _draw_playground_hud(self, frame) -> None:
         # Desenha o HUD simples do modo playground.
-        lines = [
-            "Mode: Playground",
-            f"[{self.switch_mode_key.upper()}] Switch to Memory  [{self.quit_key.upper()}] Quit",
-        ]
-        y = 30
-        for line in lines:
-            cv2.putText(frame, line, (20, y), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2)
-            y += 32
+        self._draw_quit_hint(frame)
 
     def _draw_mode_toast(self, frame, now: float) -> None:
         # Mostra toast temporario com o modo atual.
@@ -450,8 +661,7 @@ class VirtualDrums:
             return
 
         frame_h, frame_w = frame.shape[:2]
-        text_size, _ = cv2.getTextSize(message, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)
-        text_w, text_h = text_size
+        text_w, text_h = self.text_renderer.measure(message, size=28, weight="bold")
         x = max((frame_w - text_w) // 2, 10)
         y = max(frame_h - 30, 30)
 
@@ -463,7 +673,9 @@ class VirtualDrums:
         overlay = frame.copy()
         cv2.rectangle(overlay, (panel_x1, panel_y1), (panel_x2, panel_y2), (20, 20, 20), -1)
         cv2.addWeighted(overlay, 0.55, frame, 0.45, 0, frame)
-        cv2.putText(frame, message, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+        self._draw_text(
+            frame, message, x, y, size=28, color_bgr=(255, 255, 255), align="left", weight="bold", fallback_scale=0.8
+        )
 
     def _draw_failure_effect(self, frame: np.ndarray, now: float) -> np.ndarray:
         # Aplica overlay vermelho e tremor quando houver falha.
@@ -482,11 +694,17 @@ class VirtualDrums:
         transform = np.float32([[1, 0, dx], [0, 1, dy]])
         shaken = cv2.warpAffine(frame, transform, (frame_w, frame_h), borderMode=cv2.BORDER_REFLECT)
 
-        text = self.fail_visual_message
-        text_size, _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 1.4, 4)
-        tx = (frame_w - text_size[0]) // 2
-        ty = (frame_h + text_size[1]) // 2
-        cv2.putText(shaken, text, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, 1.4, (255, 255, 255), 4)
+        self._draw_text(
+            shaken,
+            self.fail_visual_message,
+            frame_w // 2,
+            frame_h // 2 + 24,
+            size=max(42, int(min(frame_w, frame_h) * 0.08)),
+            color_bgr=(255, 255, 255),
+            align="center",
+            weight="bold",
+            fallback_scale=1.4,
+        )
         return shaken
 
     def _apply_command(self, command: Optional[str], now: float) -> None:
@@ -543,48 +761,122 @@ class VirtualDrums:
         except Exception as e:
             logger.warning(f"Failed to play effect sound: {e}")
 
+    def _build_synthetic_canvas(self, frame_dim: Tuple[int, int]) -> np.ndarray:
+        # Cria canvas neutro para exibir apenas o kit (sem feed da camera).
+        frame_w, frame_h = frame_dim
+        canvas = np.full((frame_h, frame_w, 3), 220, dtype=np.uint8)
+        focus_radius = int(min(frame_w, frame_h) * 0.52)
+        cv2.circle(
+            canvas,
+            (frame_w // 2, int(frame_h * 0.56)),
+            focus_radius,
+            (236, 236, 236),
+            -1,
+            lineType=cv2.LINE_AA,
+        )
+        return canvas
+
+    def _draw_baquetas(self, frame: np.ndarray, hand_inputs: List[Dict]) -> None:
+        # Renderiza cada mao detectada usando o asset de baqueta.
+        if not self.kit:
+            return
+
+        baqueta_cfg = CONFIG.get("baqueta", {})
+        default_asset_path = baqueta_cfg.get("asset")
+        asset_left = baqueta_cfg.get("asset_left", default_asset_path)
+        asset_right = baqueta_cfg.get("asset_right", default_asset_path)
+        if not default_asset_path and not asset_left and not asset_right:
+            return
+
+        min_dim = min(frame.shape[1], frame.shape[0])
+        stick_h = max(56, int(min_dim * baqueta_cfg.get("height_pct", 0.26)))
+        tip_offset = int(stick_h * baqueta_cfg.get("tip_offset_pct", 0.18))
+        stroke_cfg = {
+            "enabled": bool(baqueta_cfg.get("stroke_enabled", True)),
+            "color_bgr": tuple(baqueta_cfg.get("stroke_color_bgr", (255, 255, 255))),
+            "px": int(baqueta_cfg.get("stroke_px", 2)),
+        }
+
+        ordered_hands = sorted(hand_inputs[:2], key=lambda info: info["index_pos"][0])
+        total_hands = len(ordered_hands)
+        for idx, hand_info in enumerate(ordered_hands):
+            tip_x, tip_y = hand_info["index_pos"]
+            if total_hands >= 2:
+                is_left_hand = idx == 0
+            else:
+                is_left_hand = tip_x < (frame.shape[1] // 2)
+
+            asset_path = asset_left if is_left_hand else asset_right
+            if not asset_path:
+                asset_path = default_asset_path
+            if not asset_path:
+                continue
+
+            native_w, native_h = self.kit.renderer.get_asset_size(asset_path)
+            if native_h > 0:
+                stick_w = max(8, int(stick_h * (native_w / native_h)))
+            else:
+                stick_w = max(8, int(stick_h * baqueta_cfg.get("width_ratio", 0.09)))
+
+            side_offset = int(stick_w * 0.4) * (-1 if is_left_hand else 1)
+            center = (tip_x + side_offset, tip_y - tip_offset)
+            self.kit.renderer.draw_asset(
+                frame,
+                asset_path,
+                center,
+                (stick_w, stick_h),
+                alpha_scale=0.98,
+                stroke=stroke_cfg,
+            )
+
     def update_loop(self) -> None:
         """Processa um frame do video."""
         if not self.cap or not self.cap.isOpened():
             logger.error("Camera not initialized or closed.")
             return
 
-        ret, frame = self.cap.read()
+        ret, camera_frame = self.cap.read()
         if not ret:
             logger.warning("Failed to read frame from camera.")
             return
 
-        # Espelha a imagem para ficar mais natural para o usuario.
-        frame = cv2.flip(frame, 1)
-        # Converte para RGB para o MediaPipe.
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        # Camera segue sendo usada para rastreamento, sem ser exibida.
+        camera_frame = cv2.flip(camera_frame, 1)
+        rgb = cv2.cvtColor(camera_frame, cv2.COLOR_BGR2RGB)
         result = self.hands.process(rgb)
+
+        frame_h, frame_w = camera_frame.shape[:2]
+        self.kit.update_frame_dim((frame_w, frame_h))
+        frame = self._build_synthetic_canvas((frame_w, frame_h))
+
         current_time = asyncio.get_event_loop().time()
-        zone_events: List[Tuple[int, str]] = []
+        dt_s = max(0.0, current_time - self.last_frame_time) if self.last_frame_time > 0.0 else 1.0 / 60.0
+        self.last_frame_time = current_time
+        zone_events_detailed: List[Tuple[int, str, Tuple[int, int]]] = []
         hand_inputs: List[Dict] = []
 
         if result.multi_hand_landmarks:
             for idx, hand_landmarks in enumerate(result.multi_hand_landmarks):
                 # Usa a ponta do indicador como posicao principal.
                 lm = hand_landmarks.landmark[8]  # Ponta do dedo indicador
-                w, h = frame.shape[1], frame.shape[0]
-                x, y = int(lm.x * w), int(lm.y * h)
+                x, y = int(lm.x * frame_w), int(lm.y * frame_h)
                 hand_inputs.append({
                     "hand_idx": idx,
                     "landmarks": hand_landmarks,
                     "index_pos": (x, y),
-                    "frame_w": w,
-                    "frame_h": h,
+                    "frame_w": frame_w,
+                    "frame_h": frame_h,
                 })
 
-                # Desenha os pontos da mao.
-                self.mp_draw.draw_landmarks(frame, hand_landmarks, self.mp_hands.HAND_CONNECTIONS)
+        self._update_intro_state(hand_inputs, current_time)
+        allow_gameplay_input = self.scene_state == SCENE_GAME
+        if allow_gameplay_input:
+            # Detecta comando por gesto (trocar modo, reiniciar, etc).
+            command = self._detect_command_gesture(hand_inputs, current_time)
+            if command:
+                self._apply_command(command, current_time)
 
-        # Detecta comando por gesto (trocar modo, reiniciar, etc).
-        command = self._detect_command_gesture(hand_inputs, current_time)
-        if command:
-            self._apply_command(command, current_time)
-        else:
+        if allow_gameplay_input:
             for info in hand_inputs:
                 idx = info["hand_idx"]
                 hand_landmarks = info["landmarks"]
@@ -599,28 +891,41 @@ class VirtualDrums:
                 # Detecta strike baseado em velocidade e posicao.
                 strike_idx = self.kit.get_hit_drum_index_by_strike((x, y), vel, current_time)
                 if strike_idx is not None:
-                    zone_events.append((strike_idx, "strike"))
+                    zone_events_detailed.append((strike_idx, "strike", (x, y)))
 
                 # Detecta eventos por gesto (pinch/fist) sobre um tambor.
                 gesture_event = self._detect_gesture_zone_event(
                     idx, hand_landmarks, (x, y), w, h, current_time
                 )
                 if gesture_event:
-                    zone_events.append(gesture_event)
+                    zone_events_detailed.append((gesture_event[0], gesture_event[1], (x, y)))
 
         indicator_states = None
+        memory_hud: Optional[Dict] = None
+        countdown_value: Optional[int] = None
+        safe_remaining = 0.0
+        draw_playground_hud = False
+        emitted_positions: List[Tuple[int, int]] = []
+
         # Remove eventos duplicados para o mesmo tambor no mesmo frame.
         dedup_events: List[Tuple[int, str]] = []
+        dedup_event_positions: List[Tuple[int, str, Tuple[int, int]]] = []
         seen = set()
-        for event in zone_events:
+        for drum_index, source, hit_pos in zone_events_detailed:
+            event = (drum_index, source)
             if event[0] in seen:
                 continue
             dedup_events.append(event)
             seen.add(event[0])
+            dedup_event_positions.append((drum_index, source, hit_pos))
 
-        if self.current_mode == MODE_MEMORY and self.memory_game:
+        if allow_gameplay_input and self.current_mode == MODE_MEMORY and self.memory_game:
             # Aplica janela segura e atualiza o jogo de memoria.
             safe_events = self._apply_memory_safe_window(dedup_events, current_time)
+            safe_indices = {event[0] for event in safe_events}
+            for drum_index, _source, hit_pos in dedup_event_positions:
+                if drum_index in safe_indices:
+                    emitted_positions.append(hit_pos)
             game_render_data = self.memory_game.update(current_time, safe_events)
             indicator_states = game_render_data["indicator_states"]
             # Toca tambores indicados pelo jogo.
@@ -636,22 +941,64 @@ class VirtualDrums:
             if game_render_data.get("sequence_completed_this_frame"):
                 # Som de sucesso ao completar sequencia.
                 self._play_sound_safe(self.success_sound)
+            memory_hud = game_render_data["hud"]
             safe_remaining = max(0.0, self.memory_safe_until - current_time)
-            self._draw_memory_hud(
-                frame,
-                game_render_data["hud"],
-                safe_remaining_s=safe_remaining,
-                countdown_value=game_render_data.get("countdown_value"),
-            )
-        else:
+            countdown_value = game_render_data.get("countdown_value")
+        elif allow_gameplay_input:
             # Modo livre: toca tambores diretamente.
             for drum_index, _source in dedup_events:
                 self.kit.play_drum_by_index(drum_index, current_time)
+            emitted_positions.extend([hit_pos for _idx, _src, hit_pos in dedup_event_positions])
             if CONFIG.get("playground", {}).get("minimal_hud", True):
-                self._draw_playground_hud(frame)
+                draw_playground_hud = True
+
+        if allow_gameplay_input and self.particles.enabled:
+            for hit_pos in emitted_positions:
+                self.particles.emit_burst(hit_pos[0], hit_pos[1])
+        self.particles.update(dt_s)
 
         # Desenha tambores e overlays.
         self.kit.draw(frame, indicator_states)
+        self.particles.draw(frame)
+        self._draw_baquetas(frame, hand_inputs)
+
+        show_tabs = self.scene_state in (SCENE_TRANSITION, SCENE_GAME)
+        if show_tabs:
+            self._draw_mode_tabs(frame)
+
+        if self.scene_state in (SCENE_INTRO, SCENE_TRANSITION):
+            frame = self._draw_intro_overlay(frame, current_time)
+            if self.scene_state == SCENE_TRANSITION:
+                progress = self._smoothstep(
+                    (current_time - self.transition_started_at)
+                    / max(float(CONFIG.get("ui", {}).get("intro_transition_ms", 650)) / 1000.0, 1e-4)
+                )
+                if memory_hud is not None:
+                    self._draw_memory_hud(
+                        frame,
+                        memory_hud,
+                        safe_remaining_s=safe_remaining,
+                        countdown_value=countdown_value,
+                    )
+                elif draw_playground_hud:
+                    self._draw_playground_hud(frame)
+                if progress < 1.0:
+                    veil = frame.copy()
+                    cv2.rectangle(veil, (0, 0), (frame_w - 1, frame_h - 1), (220, 220, 220), -1)
+                    cv2.addWeighted(veil, (1.0 - progress) * 0.10, frame, 1.0 - ((1.0 - progress) * 0.10), 0, frame)
+                # Redesenha tabs acima do overlay durante a transicao.
+                self._draw_mode_tabs(frame)
+                self._draw_quit_hint(frame)
+        elif memory_hud is not None:
+            self._draw_memory_hud(
+                frame,
+                memory_hud,
+                safe_remaining_s=safe_remaining,
+                countdown_value=countdown_value,
+            )
+        elif draw_playground_hud:
+            self._draw_playground_hud(frame)
+
         frame = self._draw_failure_effect(frame, current_time)
         self._draw_mode_toast(frame, current_time)
         cv2.imshow('DRUMble', frame)
